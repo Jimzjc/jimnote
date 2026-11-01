@@ -266,8 +266,9 @@ function openSync() {
 
 /* ---------- Router ---------- */
 function render() {
-  if (view !== 'study') stopSpeech();
-  ({ dashboard: renderDashboard, editor: renderEditor, study: renderStudy, quiz: renderQuiz })[view]();
+  if (view !== 'study' && view !== 'listen') stopSpeech();
+  if (view !== 'listen') stopListen();
+  ({ dashboard: renderDashboard, editor: renderEditor, study: renderStudy, quiz: renderQuiz, listen: renderListen })[view]();
   window.scrollTo(0, 0);
 }
 function go(v) { view = v; render(); }
@@ -397,6 +398,7 @@ function renderDashboard() {
       <p class="opacity-60 mt-1">${folder ? deckList.length + ' deck' + (deckList.length === 1 ? '' : 's') + ' in this folder' : 'Saved on this device'}</p></div>
       <div class="flex gap-2 flex-wrap">
         ${folder ? '' : `<button data-newfolder class="${btnGhost}">${icon.folder.replace('w-6 h-6', 'w-5 h-5')} New folder</button>`}
+        ${folder && deckList.length && canSpeak ? `<button data-listen class="${btnGhost}">${icon.speaker} Read aloud</button>` : ''}
         ${folder && deckList.length ? `<button data-mixquiz class="${btnGhost}">${icon.play} Mixed quiz</button>` : ''}
         <button data-new class="${btnPrimary}">${icon.plus} Create new deck</button>
       </div>
@@ -459,6 +461,7 @@ function renderDashboard() {
   });
   q('[data-quiz]').forEach(b => b.onclick = () => startQuiz(decks.find(d => d.id === b.dataset.quiz)));
   q('[data-mixquiz]').forEach(b => b.onclick = () => startMixPick(currentFolder));
+  q('[data-listen]').forEach(b => b.onclick = () => startListen(currentFolder));
   q('[data-export]').forEach(b => b.onclick = () => exportDeck(decks.find(d => d.id === b.dataset.export)));
   const rf = document.getElementById('restorefile');
   q('[data-restore]').forEach(b => b.onclick = () => rf.click());
@@ -725,6 +728,199 @@ if (canSpeak) {                               // some browsers load the voice li
   speechSynthesis.addEventListener?.('voiceschanged', () => speechSynthesis.getVoices());
 }
 window.addEventListener('pagehide', () => { if (canSpeak) speechSynthesis.cancel(); });
+
+/* ---------- Read-aloud player (several decks from one folder) ----------
+   Pick decks -> choose how many times each term and each definition is read
+   (the "- 01 +" steppers) -> the player reads every card in turn:
+     term x N, short pause, definition x M, longer pause, next card.
+   Pause lengths are the three numbers below (milliseconds). "Pause" stops
+   the voice, and "Play" starts again from the beginning of that card. */
+const LISTEN_PAUSE = { repeat: 700, side: 1100, card: 1600 };
+const LKEY = 'deckly:listen';
+icon.pause = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+const pad2 = n => String(n).padStart(2, '0');
+const clampN = n => Math.min(20, Math.max(1, parseInt(n, 10) || 1));
+const wait = ms => new Promise(r => setTimeout(r, ms));
+let lst = null;   // player state: {stage:'pick'|'play', picked, t, d, shuffle, cards, i, playing, done, phase, rep, run}
+
+function startListen(folderId) {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem(LKEY)) || {}; } catch (e) {}
+  stopSpeech();
+  lst = { stage: 'pick', folderId, picked: [], t: clampN(p.t), d: clampN(p.d), shuffle: !!p.shuffle,
+          cards: [], i: 0, playing: false, done: false, phase: null, rep: 0, run: 0, title: '' };
+  go('listen');
+}
+function saveListenPrefs() {
+  try { localStorage.setItem(LKEY, JSON.stringify({ t: lst.t, d: lst.d, shuffle: lst.shuffle })); } catch (e) {}
+}
+function stopListen() {
+  if (!lst) return;
+  lst.run++; lst.playing = false; lst.phase = null;   // run++ makes any running loop quit
+  if (canSpeak) speechSynthesis.cancel();
+}
+function say(text, id) {                               // speak one phrase; resolves when it ends
+  return new Promise(resolve => {
+    if (!lst || lst.run !== id) return resolve();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-US';
+    u.rate = 1; u.pitch = 1; u.volume = 1;             // normal speed
+    u.onend = u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+  });
+}
+async function listenLoop(id) {
+  const alive = () => lst && lst.run === id;
+  await wait(80);                                      // lets cancel() settle before the first phrase
+  while (alive() && lst.i < lst.cards.length) {
+    const c = lst.cards[lst.i];
+    for (const [phase, text, times] of [['term', c.term, lst.t], ['def', c.definition, lst.d]]) {
+      for (let r = 1; r <= times; r++) {
+        if (!alive()) return;
+        lst.phase = phase; lst.rep = r; paintPlayer();
+        await say(text, id);
+        if (!alive()) return;
+        lst.phase = null; paintPlayer();
+        // pause: between repeats, then between term and definition, then before the next card
+        await wait(r < times ? LISTEN_PAUSE.repeat : phase === 'term' ? LISTEN_PAUSE.side : LISTEN_PAUSE.card);
+        if (!alive()) return;
+      }
+    }
+    if (lst.i < lst.cards.length - 1) lst.i++;
+    else { lst.playing = false; lst.done = true; lst.phase = null; paintPlayer(); return; }
+  }
+}
+function listenPlay() {
+  if (lst.done) { lst.i = 0; lst.done = false; }
+  lst.playing = true;
+  const id = ++lst.run;
+  speechSynthesis.cancel();
+  paintPlayer();
+  listenLoop(id);
+}
+function listenPause() { stopListen(); paintPlayer(); }
+function listenSeek(n) {
+  lst.i = Math.min(lst.cards.length - 1, Math.max(0, n)); lst.done = false;
+  if (lst.playing) listenPlay();
+  else { stopListen(); paintPlayer(); }
+}
+function paintPlayer() {                               // update the player in place (no full re-render)
+  const g = id => document.getElementById(id);
+  if (!lst || lst.stage !== 'play' || !g('lbar')) return;
+  const n = lst.cards.length, c = lst.cards[lst.i];
+  g('lcount').textContent = lst.done ? `Finished · ${n} card${n === 1 ? '' : 's'}` : `Card ${lst.i + 1} of ${n}`;
+  g('lbar').style.width = ((lst.i + (lst.done ? 1 : 0)) / n * 100) + '%';
+  g('lterm-t').textContent = c.term;
+  g('ldef-t').textContent = c.definition;
+  [['lterm', 'term'], ['ldef', 'def']].forEach(([id, ph]) => {
+    const on = lst.phase === ph, dim = lst.phase && !on;
+    g(id).classList.toggle('opacity-50', !!dim);
+    ['ring-2', 'ring-brand', 'dark:ring-brand-light'].forEach(k => g(id).classList.toggle(k, on));
+  });
+  const times = lst.phase === 'term' ? lst.t : lst.d;
+  g('lstatus').textContent = lst.phase ? `Reading the ${lst.phase === 'term' ? 'term' : 'definition'} · ${lst.rep} of ${times}`
+    : lst.done ? 'All cards read.' : lst.playing ? 'Pausing…' : 'Paused';
+  g('lplay').innerHTML = lst.playing ? icon.pause + ' Pause' : icon.play + (lst.done ? ' Replay' : ' Play');
+  g('lprev').disabled = lst.i === 0; g('lnext').disabled = lst.i >= n - 1;
+  g('lprev').classList.toggle('opacity-40', lst.i === 0); g('lnext').classList.toggle('opacity-40', lst.i >= n - 1);
+}
+
+function renderListen() {
+  if (!lst) return go('dashboard');
+  return lst.stage === 'play' ? renderListenPlay() : renderListenPick();
+}
+function stepper(key, label) {
+  const b = 'w-10 h-10 text-xl font-medium hover:bg-black/5 dark:hover:bg-white/10 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light';
+  return `<div class="flex items-center justify-between gap-3 p-4 rounded-xl border-2 border-black/10 dark:border-white/10 bg-white dark:bg-[#16211d]">
+    <span class="font-medium">${label}</span>
+    <div role="group" aria-label="${label}" class="inline-flex items-center rounded-lg border border-black/15 dark:border-white/15">
+      <button type="button" data-step="${key}" data-dir="-1" aria-label="Decrease" class="${b} rounded-l-lg">&minus;</button>
+      <output id="n-${key}" class="w-12 text-center font-semibold tabular-nums" aria-live="polite">${pad2(lst[key])}</output>
+      <button type="button" data-step="${key}" data-dir="1" aria-label="Increase" class="${b} rounded-r-lg">+</button>
+    </div></div>`;
+}
+function renderListenPick() {
+  const q = lst, folder = folders.find(f => f.id === q.folderId);
+  const list = sortItems(decks.filter(d => (d.folderId || null) === q.folderId), 'title', 'modified');
+  q.picked = q.picked.filter(id => list.some(d => d.id === id));
+  $app.innerHTML = `<div class="max-w-2xl mx-auto">
+    <div class="mb-4"><button id="lexit" class="${btnGhost} !py-2">${icon.left} Decks</button></div>
+    <h1 class="text-3xl font-bold tracking-tight break-words">Read aloud${folder ? ': ' + esc(folder.name) : ''}</h1>
+    <p class="opacity-60 mt-1 mb-5">Choose the decks to listen to. Each card is read as the term, a short pause, then the definition.</p>
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      <button id="lall" class="${btnGhost} !py-1.5">Select all</button>
+      <button id="lnone" class="${btnGhost} !py-1.5">Clear</button>
+    </div>
+    <div class="space-y-2">${list.map(d => `<label class="flex items-center gap-3 p-4 rounded-xl border-2 border-black/10 dark:border-white/10 bg-white dark:bg-[#16211d] cursor-pointer hover:border-brand dark:hover:border-brand-light transition">
+      <input type="checkbox" data-ldeck="${d.id}" ${q.picked.includes(d.id) ? 'checked' : ''} class="w-5 h-5 accent-teal-700">
+      <span class="min-w-0 flex-1"><span class="block font-medium truncate">${esc(d.title)}</span>
+      <span class="block text-sm opacity-60">${d.cards.length} card${d.cards.length === 1 ? '' : 's'}</span></span></label>`).join('')}</div>
+    <h2 class="text-lg font-bold mt-6 mb-2">How many times?</h2>
+    <div class="space-y-2">${stepper('t', 'Read each term')}${stepper('d', 'Read each definition')}</div>
+    <label class="flex items-center gap-3 mt-3 cursor-pointer"><input type="checkbox" id="lshuf" ${q.shuffle ? 'checked' : ''} class="w-5 h-5 accent-teal-700"><span>Shuffle the cards</span></label>
+    <p id="linfo" class="text-sm opacity-70 mt-4 min-h-[1.25rem]"></p>
+    <button id="lgo" class="${btnPrimary} mt-3 disabled:opacity-40 disabled:pointer-events-none">${icon.speaker} Start reading</button>
+  </div>`;
+  const boxes = [...$app.querySelectorAll('[data-ldeck]')];
+  const update = () => {                               // update in place so the page doesn't jump
+    q.picked = boxes.filter(b => b.checked).map(b => b.dataset.ldeck);
+    const m = mixDeck(q.picked, q.folderId);
+    document.getElementById('linfo').textContent = q.picked.length
+      ? `${q.picked.length} deck${q.picked.length === 1 ? '' : 's'} selected · ${m.cards.length} unique card${m.cards.length === 1 ? '' : 's'}`
+      : 'No decks selected yet.';
+    document.getElementById('lgo').disabled = !m.cards.length;
+  };
+  boxes.forEach(b => b.onchange = update);
+  document.getElementById('lall').onclick = () => { boxes.forEach(b => b.checked = true); update(); };
+  document.getElementById('lnone').onclick = () => { boxes.forEach(b => b.checked = false); update(); };
+  $app.querySelectorAll('[data-step]').forEach(b => b.onclick = () => {
+    const k = b.dataset.step;
+    q[k] = clampN(q[k] + +b.dataset.dir);
+    document.getElementById('n-' + k).textContent = pad2(q[k]);
+    saveListenPrefs();
+  });
+  document.getElementById('lshuf').onchange = e => { q.shuffle = e.target.checked; saveListenPrefs(); };
+  document.getElementById('lexit').onclick = () => go('dashboard');
+  document.getElementById('lgo').onclick = () => {
+    const cards = mixDeck(q.picked, q.folderId).cards;
+    if (!cards.length) return;
+    q.cards = q.shuffle ? shuffleArr(cards) : cards;
+    q.title = (folder ? folder.name + ' · ' : '') + q.picked.length + ' deck' + (q.picked.length === 1 ? '' : 's');
+    q.stage = 'play'; q.i = 0; q.done = false; q.phase = null;
+    render(); listenPlay();
+  };
+  update();
+}
+function renderListenPlay() {
+  const q = lst;
+  $app.innerHTML = `<div class="max-w-2xl mx-auto">
+    <div class="flex items-center justify-between gap-2 mb-4 flex-wrap">
+      <button id="lback" class="${btnGhost} !py-2">${icon.left} Choose decks</button>
+      <span class="text-sm opacity-60">Term &times;${pad2(q.t)} · Definition &times;${pad2(q.d)}</span>
+    </div>
+    <h1 class="text-xl font-bold truncate">${esc(q.title)}</h1>
+    <div class="h-1.5 rounded-full bg-black/10 dark:bg-white/10 my-3 overflow-hidden"><div id="lbar" class="h-full bg-brand dark:bg-brand-light transition-all duration-300"></div></div>
+    <p id="lcount" class="text-sm opacity-60 mb-4"></p>
+    <div id="lterm" class="rounded-2xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 shadow p-6 sm:p-8 mb-3 transition">
+      <p class="text-sm opacity-50 mb-2">Term</p><p id="lterm-t" class="text-2xl sm:text-3xl font-bold break-words"></p></div>
+    <div id="ldef" class="rounded-2xl bg-brand text-white shadow p-6 sm:p-8 transition">
+      <p class="text-sm opacity-70 mb-2">Definition</p><p id="ldef-t" class="text-xl sm:text-2xl font-medium break-words"></p></div>
+    <p id="lstatus" class="text-center text-sm opacity-60 mt-4 min-h-[1.25rem]"></p>
+    <div class="flex justify-center gap-3 mt-4">
+      <button id="lprev" class="${btnGhost}">${icon.left} Previous</button>
+      <button id="lplay" class="${btnPrimary} min-w-[8.5rem] justify-center"></button>
+      <button id="lnext" class="${btnGhost}">Next ${icon.right}</button>
+    </div>
+    <p class="text-center text-sm opacity-50 mt-4">Space plays or pauses. Use ← → to skip cards.</p>
+  </div>`;
+  const g = id => document.getElementById(id);
+  g('lback').onclick = () => { stopListen(); q.stage = 'pick'; render(); };
+  g('lplay').onclick = () => q.playing ? listenPause() : listenPlay();
+  g('lprev').onclick = () => listenSeek(q.i - 1);
+  g('lnext').onclick = () => listenSeek(q.i + 1);
+  paintPlayer();
+}
 
 /* ---------- Study mode ---------- */
 function renderStudy() {
@@ -1168,6 +1364,12 @@ document.addEventListener('keydown', e => {
     const k = parseInt(e.key, 10);                       // keys 1-4 pick an answer
     if (k >= 1 && k <= 4) document.querySelector(`[data-opt="${k - 1}"]`)?.click();
     else if (e.key === 'Enter' && !e.target.closest('button')) document.getElementById('qnext')?.click();
+    return;
+  }
+  if (view === 'listen' && lst && lst.stage === 'play' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+    if (e.key === 'ArrowRight') listenSeek(lst.i + 1);
+    else if (e.key === 'ArrowLeft') listenSeek(lst.i - 1);
+    else if (e.key === ' ' && document.activeElement.tagName !== 'BUTTON') { e.preventDefault(); lst.playing ? listenPause() : listenPlay(); }
     return;
   }
   if (view !== 'study' || /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
