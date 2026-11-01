@@ -266,6 +266,7 @@ function openSync() {
 
 /* ---------- Router ---------- */
 function render() {
+  if (view !== 'study') stopSpeech();
   ({ dashboard: renderDashboard, editor: renderEditor, study: renderStudy, quiz: renderQuiz })[view]();
   window.scrollTo(0, 0);
 }
@@ -676,6 +677,55 @@ function bindWrongToggle(root) {
   });
 }
 
+/* ---------- Read aloud (text-to-speech) ----------
+   Uses the browser's built-in speechSynthesis. We look for the Microsoft Edge
+   voice "Microsoft AvaMultilingual Online (Natural) - English (United States)"
+   at normal speed (rate 1). That voice only exists in Microsoft Edge; in other
+   browsers we fall back to the best English (US) voice available. */
+icon.speaker = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>';
+icon.stop = '<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+const canSpeak = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+const VOICE_RE = /AvaMultilingual/i;
+let autoplay = (() => { try { return localStorage.getItem('deckly:autoplay') === '1'; } catch (e) { return false; } })();
+let speaking = false, speechId = 0;
+
+function pickVoice() {
+  const vs = speechSynthesis.getVoices();
+  return vs.find(v => VOICE_RE.test(v.name) && /^en/i.test(v.lang))
+      || vs.find(v => VOICE_RE.test(v.name))
+      || vs.find(v => /Natural/i.test(v.name) && /^en-US/i.test(v.lang))
+      || vs.find(v => v.lang === 'en-US' || v.lang === 'en_US')
+      || null;
+}
+function paintListen() {
+  const b = document.getElementById('listen');
+  if (!b) return;
+  b.innerHTML = (speaking ? icon.stop + ' Stop' : icon.speaker + ' Listen');
+  b.setAttribute('aria-label', speaking ? 'Stop reading aloud' : 'Read aloud');
+}
+function speak(text) {
+  if (!canSpeak || !text) return;
+  const id = ++speechId;                      // ignore events from a cancelled utterance
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  const v = pickVoice();
+  if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-US';
+  u.rate = 1; u.pitch = 1; u.volume = 1;      // normal speed
+  u.onstart = () => { if (id === speechId) { speaking = true; paintListen(); } };
+  u.onend = u.onerror = () => { if (id === speechId) { speaking = false; paintListen(); } };
+  speechSynthesis.speak(u);
+}
+function stopSpeech() {
+  if (!canSpeak) return;
+  speechId++; speechSynthesis.cancel();
+  speaking = false; paintListen();
+}
+if (canSpeak) {                               // some browsers load the voice list late
+  speechSynthesis.getVoices();
+  speechSynthesis.addEventListener?.('voiceschanged', () => speechSynthesis.getVoices());
+}
+window.addEventListener('pagehide', () => { if (canSpeak) speechSynthesis.cancel(); });
+
 /* ---------- Study mode ---------- */
 function renderStudy() {
   const total = studyDeck.cards.length;
@@ -713,6 +763,13 @@ function renderStudy() {
       </div>
       <p class="text-center text-sm opacity-50 mt-4">Click the card or press Space to flip. Use ← → to navigate.</p>
 
+      ${canSpeak ? `<div class="flex items-center justify-center gap-4 mt-5 flex-wrap">
+        <button id="listen" aria-label="Read aloud" class="${btnGhost} !py-2">${icon.speaker} Listen</button>
+        <button id="autoplay" type="button" role="switch" aria-checked="${autoplay}" class="inline-flex items-center gap-2 text-sm font-medium rounded-lg px-2 py-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light">
+          <span id="auto-track" class="relative inline-block w-10 h-6 rounded-full transition-colors"><span id="auto-knob" class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"></span></span>
+          Autoplay
+        </button>
+      </div>` : ''}
       <div class="flex justify-center gap-3 mt-6">
         <button id="prev" class="${btnGhost}">${icon.left} Previous</button>
         <button id="next" class="${btnPrimary}">Next ${icon.right}</button>
@@ -741,6 +798,7 @@ function renderStudy() {
     if (dir) {   // slide-in animation from the direction of travel
       slide.classList.remove('slide-next', 'slide-prev'); void slide.offsetWidth;
       slide.classList.add(dir > 0 ? 'slide-next' : 'slide-prev');
+      if (autoplay) speak(frontOf(c)); else stopSpeech();   // read the new card automatically
     }
   };
   const move = n => { const j = idx + n; if (j >= 0 && j < total) { idx = j; show(n); } };
@@ -761,6 +819,24 @@ function renderStudy() {
     const text = card.classList.contains('flipped') ? backOf(c) : frontOf(c);
     window.open('https://www.google.com/search?q=' + encodeURIComponent(text), '_blank', 'noopener');
   };
+  if (canSpeak) {
+    const paintAuto = () => {
+      $('autoplay').setAttribute('aria-checked', String(autoplay));
+      $('auto-track').className = 'relative inline-block w-10 h-6 rounded-full transition-colors ' + (autoplay ? 'bg-brand' : 'bg-black/25 dark:bg-white/25');
+      $('auto-knob').style.transform = autoplay ? 'translateX(16px)' : '';
+    };
+    paintAuto(); paintListen();
+    $('listen').onclick = () => {
+      if (speaking) return stopSpeech();
+      const c = studyDeck.cards[idx];       // reads whichever side is showing
+      speak(card.classList.contains('flipped') ? backOf(c) : frontOf(c));
+    };
+    $('autoplay').onclick = () => {
+      autoplay = !autoplay;
+      try { localStorage.setItem('deckly:autoplay', autoplay ? '1' : '0'); } catch (e) {}
+      paintAuto();
+    };
+  }
   bindFirstToggle($app);
   show();
 }
@@ -1094,7 +1170,10 @@ document.addEventListener('keydown', e => {
   if (view !== 'study' || /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
   if (e.key === 'ArrowRight') document.getElementById('next').click();
   else if (e.key === 'ArrowLeft') document.getElementById('prev').click();
-  else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); document.getElementById('card').click(); }
+  else if (e.key === ' ' || e.key === 'Enter') {
+    if (document.activeElement.tagName === 'BUTTON') return;   // let focused buttons (Listen, Autoplay...) work
+    e.preventDefault(); document.getElementById('card').click();
+  }
 });
 
 /* Header controls */
