@@ -803,7 +803,10 @@ function renderStudy() {
   };
   const move = n => { const j = idx + n; if (j >= 0 && j < total) { idx = j; show(n); } };
 
-  card.onclick = () => card.classList.toggle('flipped');
+  card.onclick = () => {
+    const flipped = card.classList.toggle('flipped');
+    if (autoplay) { const c = studyDeck.cards[idx]; speak(flipped ? backOf(c) : frontOf(c)); }   // read the side now showing
+  };
   $('prev').onclick = () => move(-1);
   $('next').onclick = () => move(1);
   $('back').onclick = () => go('dashboard');
