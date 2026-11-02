@@ -692,13 +692,45 @@ const VOICE_RE = /AvaMultilingual/i;
 let autoplay = (() => { try { return localStorage.getItem('deckly:autoplay') === '1'; } catch (e) { return false; } })();
 let speaking = false, speechId = 0;
 
+const VKEY = 'deckly:voice';
+const NOVELTY = /^(Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Fred|Junior|Ralph|Kathy|Hysterical|Princess)\b/i;
+const voiceRank = v => /premium/i.test(v.name) ? 0 : /enhanced|natural|neural/i.test(v.name) ? 1 : /^(Samantha|Ava|Allison|Susan|Zoe|Evan|Nathan)\b/i.test(v.name) ? 2 : 3;
+function englishVoices() {                    // English voices, best-sounding first, novelty voices removed
+  return speechSynthesis.getVoices()
+    .filter(v => /^en/i.test(v.lang) && !NOVELTY.test(v.name))
+    .sort((a, b) => voiceRank(a) - voiceRank(b) || (/^en[-_]US/i.test(b.lang) - /^en[-_]US/i.test(a.lang)) || a.name.localeCompare(b.name));
+}
 function pickVoice() {
   const vs = speechSynthesis.getVoices();
-  return vs.find(v => VOICE_RE.test(v.name) && /^en/i.test(v.lang))
-      || vs.find(v => VOICE_RE.test(v.name))
-      || vs.find(v => /Natural/i.test(v.name) && /^en-US/i.test(v.lang))
-      || vs.find(v => v.lang === 'en-US' || v.lang === 'en_US')
-      || null;
+  let saved = ''; try { saved = localStorage.getItem(VKEY) || ''; } catch (e) {}
+  return (saved && vs.find(v => v.voiceURI === saved))      // 1. the voice you chose in the Voice menu
+      || vs.find(v => VOICE_RE.test(v.name))                // 2. Microsoft AvaMultilingual (Edge)
+      || englishVoices().find(v => /^en[-_]US/i.test(v.lang))   // 3. best English (US) voice installed
+      || englishVoices()[0]
+      || null;                                              // 4. let the browser use its own default
+}
+function voiceMenuHTML() {
+  return `<label for="voicesel" class="opacity-70">Voice</label>
+    <select id="voicesel" class="${input} !w-auto !py-1.5 max-w-[16rem]"></select>`;
+}
+function bindVoiceSelect() {
+  const sel = document.getElementById('voicesel');
+  if (!sel || !canSpeak) return;
+  const fill = () => {
+    let saved = ''; try { saved = localStorage.getItem(VKEY) || ''; } catch (e) {}
+    const vs = englishVoices();
+    sel.innerHTML = '<option value="">Automatic (best available)</option>' +
+      vs.map(v => `<option value="${esc(v.voiceURI)}">${esc(v.name)}</option>`).join('');
+    sel.value = vs.some(v => v.voiceURI === saved) ? saved : '';
+  };
+  fill();
+  const h = () => { if (!sel.isConnected) return speechSynthesis.removeEventListener('voiceschanged', h); fill(); };
+  speechSynthesis.addEventListener('voiceschanged', h);
+  sel.onchange = () => {
+    try { localStorage.setItem(VKEY, sel.value); } catch (e) {}
+    if (lst && view === 'listen') stopListen();
+    speak('Hello, this is how I sound.');                  // preview
+  };
 }
 function paintListen() {
   const b = document.getElementById('listen');
@@ -858,6 +890,7 @@ function renderListenPick() {
       <span class="block text-sm opacity-60">${d.cards.length} card${d.cards.length === 1 ? '' : 's'}</span></span></label>`).join('')}</div>
     <h2 class="text-lg font-bold mt-6 mb-2">How many times?</h2>
     <div class="space-y-2">${stepper('t', 'Read each term')}${stepper('d', 'Read each definition')}</div>
+    <div class="flex items-center gap-2 mt-3 text-sm flex-wrap">${voiceMenuHTML()}</div>
     <label class="flex items-center gap-3 mt-3 cursor-pointer"><input type="checkbox" id="lshuf" ${q.shuffle ? 'checked' : ''} class="w-5 h-5 accent-teal-700"><span>Shuffle the cards</span></label>
     <p id="linfo" class="text-sm opacity-70 mt-4 min-h-[1.25rem]"></p>
     <button id="lgo" class="${btnPrimary} mt-3 disabled:opacity-40 disabled:pointer-events-none">${icon.speaker} Start reading</button>
@@ -881,6 +914,7 @@ function renderListenPick() {
     saveListenPrefs();
   });
   document.getElementById('lshuf').onchange = e => { q.shuffle = e.target.checked; saveListenPrefs(); };
+  bindVoiceSelect();
   document.getElementById('lexit').onclick = () => go('dashboard');
   document.getElementById('lgo').onclick = () => {
     const cards = mixDeck(q.picked, q.folderId).cards;
@@ -965,7 +999,8 @@ function renderStudy() {
           <span id="auto-track" class="relative inline-block w-10 h-6 rounded-full transition-colors"><span id="auto-knob" class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"></span></span>
           Autoplay
         </button>
-      </div>` : ''}
+      </div>
+      <div class="flex items-center justify-center gap-2 mt-2 text-sm flex-wrap">${voiceMenuHTML()}</div>` : ''}
       <div class="flex justify-center gap-3 mt-6">
         <button id="prev" class="${btnGhost}">${icon.left} Previous</button>
         <button id="next" class="${btnPrimary}">Next ${icon.right}</button>
@@ -1024,7 +1059,7 @@ function renderStudy() {
       $('auto-track').className = 'relative inline-block w-10 h-6 rounded-full transition-colors ' + (autoplay ? 'bg-brand' : 'bg-black/25 dark:bg-white/25');
       $('auto-knob').style.transform = autoplay ? 'translateX(16px)' : '';
     };
-    paintAuto(); paintListen();
+    paintAuto(); paintListen(); bindVoiceSelect();
     $('listen').onclick = () => {
       if (speaking) return stopSpeech();
       const c = studyDeck.cards[idx];       // reads whichever side is showing
