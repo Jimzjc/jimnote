@@ -735,7 +735,7 @@ function bindVoiceSelect() {
 function paintListen() {
   const b = document.getElementById('listen');
   if (!b) return;
-  b.innerHTML = (speaking ? icon.stop + ' Stop' : icon.speaker + ' Listen');
+  b.innerHTML = b.dataset.icon ? (speaking ? icon.stop : icon.speaker) : (speaking ? icon.stop + ' Stop' : icon.speaker + ' Listen');
   b.setAttribute('aria-label', speaking ? 'Stop reading aloud' : 'Read aloud');
 }
 function speak(text) {
@@ -1264,6 +1264,10 @@ function buildQuiz(deck, n) {
   });
 }
 
+icon.bulb = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>';
+icon.search = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>';
+icon.cross = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>';
+
 function renderQuiz() {
   const q = quiz;
   if (q.stage === 'pick') return renderMixPick();
@@ -1300,12 +1304,48 @@ function renderQuiz() {
     const cur = q.qs[q.i], last = q.i === q.qs.length - 1;
     const ok = q.done === 'correct', shown = q.done === 'revealed', over = ok || shown;
     const green = 'border-emerald-500 bg-emerald-500/15';
-    const opt = (o, k) => {
-      const tried = q.tried.includes(k);
+    /* Study aids for this question (tips + cross-outs). Kept per question and reset
+       automatically whenever the question list or the question number changes. */
+    if (!q.aid || q.aid.qs !== q.qs || q.aid.i !== q.i) q.aid = { qs: q.qs, i: q.i, tipped: [], crossed: [] };
+    const aid = q.aid;
+    const optBase = 'flex-1 min-w-0 text-left px-4 py-3.5 rounded-xl border-2 transition break-words ';
+    const optState = k => {
+      const tried = q.tried.includes(k), tipped = aid.tipped.includes(k), crossed = aid.crossed.includes(k);
+      return { tried, tipped, crossed, off: over || tried || tipped, canCross: !over && !tried && !tipped };
+    };
+    const optCls = (o, k) => {
+      const st = optState(k);
       let cls = 'border-black/15 dark:border-white/15 bg-white dark:bg-[#16211d] hover:border-brand dark:hover:border-brand-light';
-      if (tried) cls = 'border-red-500 bg-red-500/15 opacity-70';                       // an answer already tried
+      if (st.tried) cls = 'border-red-500 bg-red-500/15 opacity-70';                       // an answer already tried
       else if (over) cls = o === cur.answer ? green : 'border-black/10 dark:border-white/10 opacity-60';
-      return `<button data-opt="${k}" ${over || tried ? 'disabled' : ''} class="w-full text-left px-4 py-3.5 rounded-xl border-2 transition break-words ${cls}"><span class="opacity-50 mr-2">${k + 1}</span>${esc(o)}</button>`;
+      else if (st.tipped) cls = 'border-black/10 dark:border-white/10 bg-white dark:bg-[#16211d] opacity-40 line-through';   // ruled out by a tip
+      else if (st.crossed) cls += ' opacity-50 line-through';                              // crossed out by the player
+      return optBase + cls;
+    };
+    const crossCls = k => 'shrink-0 w-11 flex items-center justify-center rounded-xl border-2 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light ' +
+      (aid.crossed.includes(k) ? 'border-brand dark:border-brand-light text-brand dark:text-brand-light bg-brand/10' : 'border-black/15 dark:border-white/15 opacity-60 hover:opacity-100') +
+      (optState(k).canCross ? '' : ' invisible');
+    const opt = (o, k) => {
+      const st = optState(k);
+      return `<div class="flex items-stretch gap-2"><button data-opt="${k}" ${st.off ? 'disabled' : ''} class="${optCls(o, k)}"><span class="opacity-50 mr-2">${k + 1}</span>${esc(o)}</button>` +
+        `<button data-cross="${k}" ${st.canCross ? '' : 'disabled tabindex="-1"'} aria-pressed="${st.crossed}" aria-label="${st.crossed ? 'Restore choice ' : 'Cross out choice '}${k + 1}" title="${st.crossed ? 'Restore this choice' : 'Cross out this choice'}" class="${crossCls(k)}">${icon.cross}</button></div>`;
+    };
+    // Tip: rules out one random wrong answer (regular quizzes only; always leaves at least 2 choices live)
+    const liveCount = () => cur.options.filter((o, k) => !q.tried.includes(k) && !aid.tipped.includes(k)).length;
+    const tipOk = () => !over && liveCount() > 2;
+    const tipBtn = !q.timed && !over
+      ? `<button id="qtip" ${tipOk() ? '' : 'disabled'} class="${btnGhost} !py-1.5 !px-3 text-sm disabled:opacity-40 disabled:pointer-events-none" title="Rule out one wrong answer">${icon.bulb} Tip</button>` : '';
+    const repaint = () => {                         // update in place so the page doesn't jump or stop the voice
+      cur.options.forEach((o, k) => {
+        const b = $app.querySelector(`[data-opt="${k}"]`), x = $app.querySelector(`[data-cross="${k}"]`), st = optState(k);
+        if (b) { b.className = optCls(o, k); b.disabled = st.off; }
+        if (x) {
+          x.className = crossCls(k); x.disabled = !st.canCross; x.setAttribute('aria-pressed', String(st.crossed));
+          x.setAttribute('aria-label', (st.crossed ? 'Restore choice ' : 'Cross out choice ') + (k + 1));
+          x.title = st.crossed ? 'Restore this choice' : 'Cross out this choice';
+        }
+      });
+      const t = document.getElementById('qtip'); if (t) t.disabled = !tipOk();
     };
     const nextBtn = `<button id="qnext" class="${btnPrimary}">${last ? 'See results' : 'Next'} ${icon.right}</button>`;
     const note = ok ? `<p class="font-medium text-emerald-600 dark:text-emerald-400">Correct!${q.timed ? ' +' + q.gain + (q.gain === 1 ? ' point' : ' points') : ''}</p>${nextBtn}`
@@ -1316,10 +1356,17 @@ function renderQuiz() {
       <div class="h-1.5 rounded-full bg-black/10 dark:bg-white/10 mb-3 overflow-hidden"><div class="h-full bg-brand dark:bg-brand-light transition-all duration-300" style="width:${(q.i + (over ? 1 : 0)) / q.qs.length * 100}%"></div></div>
       <p class="text-sm opacity-60 mb-3">Question ${q.i + 1} of ${q.qs.length}${q.timed ? ` · Quiz ID <span class="font-mono">${q.qid}</span>` : ''}</p>
       <div class="rounded-2xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 shadow p-6 sm:p-8 mb-5">
-        <p class="text-sm opacity-50 mb-2">${sideName(q.side)}</p>
+        <div class="flex items-start justify-between gap-3 mb-2">
+          <p class="text-sm opacity-50 pt-1">${sideName(q.side)}</p>
+          <div class="flex items-center gap-2 shrink-0">
+            ${canSpeak ? `<button id="listen" data-icon="1" aria-label="Read question aloud" title="Read question aloud" class="p-1.5 rounded-full text-brand dark:text-brand-light hover:bg-brand/10 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light">${icon.speaker}</button>` : ''}
+            ${q.timed ? '' : `<a id="qsearch" href="https://www.google.com/search?q=${encodeURIComponent(cur.prompt)}" target="_blank" rel="noopener noreferrer" class="${btnGhost} !py-1.5 !px-3 text-sm" title="Search this question on Google">${icon.search} Google</a>`}
+          </div>
+        </div>
         <p class="text-2xl font-bold break-words">${esc(cur.prompt)}</p>
       </div>
       <div class="space-y-3">${cur.options.map(opt).join('')}</div>
+      ${tipBtn ? `<div class="flex flex-wrap items-center gap-2 mt-4">${tipBtn}</div>` : ''}
       ${note ? `<div class="flex items-center justify-between gap-3 mt-5">${note}</div>` : ''}
     </div>`;
 
@@ -1357,6 +1404,22 @@ function renderQuiz() {
         render();
       }
     });
+    $app.querySelectorAll('[data-cross]').forEach(b => b.onclick = () => {
+      const k = +b.dataset.cross, at = aid.crossed.indexOf(k);
+      if (at < 0) aid.crossed.push(k); else aid.crossed.splice(at, 1);
+      repaint();
+    });
+    const tp = document.getElementById('qtip');
+    if (tp) tp.onclick = () => {
+      const wrong = cur.options.map((o, k) => k).filter(k => cur.options[k] !== cur.answer && !q.tried.includes(k) && !aid.tipped.includes(k));
+      if (!tipOk() || !wrong.length) return;
+      const fresh = wrong.filter(k => !aid.crossed.includes(k));       // prefer one the player hasn't already crossed out
+      const pool = fresh.length ? fresh : wrong;
+      aid.tipped.push(pool[Math.floor(Math.random() * pool.length)]);
+      repaint();
+    };
+    const rd = document.getElementById('listen');                       // read the question only, never the choices
+    if (rd) rd.onclick = () => { if (speaking) return stopSpeech(); speak(cur.prompt); };
     const rv = document.getElementById('reveal');
     if (rv) rv.onclick = () => { q.done = 'revealed'; render(); };
     const nx = document.getElementById('qnext');
