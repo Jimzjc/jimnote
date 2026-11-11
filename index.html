@@ -117,7 +117,7 @@ let folders = loadFolders(); // each folder: {id, name, created}
 let currentFolder = null;    // folder id being viewed (null = top level)
 // The chosen sort order is remembered too ('modified' or 'az')
 let sort = (() => { try { return localStorage.getItem('deckly:sort') || 'modified'; } catch (e) { return 'modified'; } })();
-let view = 'dashboard';     // 'dashboard' | 'editor' | 'study'
+let view = 'dashboard';     // 'dashboard' | 'editor' | 'study' | 'quiz' | 'listen' | 'notes'
 let editingId = null;       // deck being edited (null = new deck)
 let studyDeck = null;       // deck being studied
 let idx = 0;                // current card index
@@ -178,7 +178,7 @@ function cleanData(data) {
   return {
     decks: (data.decks || []).filter(d => d && typeof d.title === 'string' && Array.isArray(d.cards)).map(d => ({
       id: String(d.id || uid()), title: d.title, folderId: d.folderId || null, modified: +d.modified || 0,
-      cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition })) })),
+      cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition })), notes: cleanNotes(d.notes) })),
     folders: (data.folders || []).filter(f => f && typeof f.name === 'string').map(f => ({
       id: String(f.id || uid()), name: f.name, created: +f.created || 0, modified: +f.modified || 0 }))
   };
@@ -268,7 +268,7 @@ function openSync() {
 function render() {
   if (view !== 'study' && view !== 'listen') stopSpeech();
   if (view !== 'listen') stopListen();
-  ({ dashboard: renderDashboard, editor: renderEditor, study: renderStudy, quiz: renderQuiz, listen: renderListen })[view]();
+  ({ dashboard: renderDashboard, editor: renderEditor, study: renderStudy, quiz: renderQuiz, listen: renderListen, notes: renderNotes })[view]();
   window.scrollTo(0, 0);
 }
 function go(v) { view = v; render(); }
@@ -341,7 +341,7 @@ function restoreFrom(file) {
       // Re-build every record from known fields only, so a bad file can't inject junk
       const inDecks = (data.decks || []).filter(d => d && typeof d.title === 'string' && Array.isArray(d.cards)).map(d => ({
         id: String(d.id || uid()), title: d.title, folderId: d.folderId || null, modified: +d.modified || 0,
-        cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition }))
+        cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition })), notes: cleanNotes(d.notes)
       }));
       const inFolders = (data.folders || []).filter(f => f && typeof f.name === 'string')
         .map(f => ({ id: String(f.id || uid()), name: f.name, created: +f.created || 0 }));
@@ -364,6 +364,7 @@ function deckCard(d) {
     <div class="mt-5 flex flex-wrap items-center gap-2">
       <button data-study="${d.id}" class="${btnPrimary} !py-2">${icon.play} Study</button>
       <button data-quiz="${d.id}" class="${btnGhost} !py-2">Quiz</button>
+      <button data-notes="${d.id}" class="${btnGhost} !py-2">${icon.notes} Notes${d.notes && d.notes.length ? ` <span class="text-xs opacity-60">(${d.notes.length})</span>` : ''}</button>
       <button data-edit="${d.id}" aria-label="Edit deck" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition">${icon.edit}</button>
       <button data-export="${d.id}" aria-label="Export deck as text file" title="Export as .txt" class="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition">${icon.download}</button>
       <button data-del="${d.id}" aria-label="Delete deck" class="p-2 rounded-lg hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400 transition ml-auto">${icon.trash}</button>
@@ -460,6 +461,7 @@ function renderDashboard() {
     render();
   });
   q('[data-quiz]').forEach(b => b.onclick = () => startQuiz(decks.find(d => d.id === b.dataset.quiz)));
+  q('[data-notes]').forEach(b => b.onclick = () => startNotes(decks.find(d => d.id === b.dataset.notes)));
   q('[data-mixquiz]').forEach(b => b.onclick = () => startMixPick(currentFolder));
   q('[data-listen]').forEach(b => b.onclick = () => startListen(currentFolder));
   q('[data-export]').forEach(b => b.onclick = () => exportDeck(decks.find(d => d.id === b.dataset.export)));
@@ -956,6 +958,274 @@ function renderListenPlay() {
   paintPlayer();
 }
 
+/* ---------- Notes (key notes for each deck / module) ----------
+   Each deck can hold a list of short notes: deck.notes = [{id, text}].
+   They are saved with the deck (so they back up and sync with it), can be
+   added, edited, deleted and imported in bulk, and can be read aloud one at
+   a time or all in a row. Long notes are split into sentences before being
+   spoken, because some browsers silently stop very long utterances. */
+icon.notes = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
+let notesDeckId = null;      // deck whose notes page is open
+let editingNote = null;      // id of the note being edited inline (null = none)
+let notesRead = null;        // {id, i, all} while reading aloud; id matches speechId
+
+const cleanNotes = list => Array.isArray(list)
+  ? list.filter(n => n && typeof n.text === 'string' && n.text.trim()).map(n => ({ id: String(n.id || uid()), text: n.text }))
+  : [];
+const notesDeck = () => decks.find(d => d.id === notesDeckId);
+function startNotes(deck) {
+  if (!deck) return;
+  notesDeckId = deck.id; editingNote = null;
+  go('notes');
+}
+function saveNotes(deck) {
+  deck.modified = Date.now();          // so sync knows this deck changed
+  saveDecks();
+}
+
+// Split text into speakable chunks (sentences, max ~220 characters each)
+function speechChunks(text) {
+  const parts = String(text).replace(/\s+/g, ' ').trim().match(/[^.!?;:]+[.!?;:]*\s*/g) || [];
+  const out = [];
+  parts.forEach(p => {
+    p = p.trim(); if (!p) return;
+    while (p.length > 220) {           // very long sentence: break at a space
+      let cut = p.lastIndexOf(' ', 220); if (cut < 80) cut = 220;
+      out.push(p.slice(0, cut)); p = p.slice(cut).trim();
+    }
+    if (out.length && (out[out.length - 1] + ' ' + p).length < 160) out[out.length - 1] += ' ' + p;   // join short bits
+    else out.push(p);
+  });
+  return out;
+}
+function utter(text, id) {             // speak one chunk; resolves when it ends (or was cancelled)
+  return new Promise(resolve => {
+    if (id !== speechId) return resolve();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-US';
+    u.rate = 1; u.pitch = 1; u.volume = 1;
+    u.onend = u.onerror = () => resolve();
+    speechSynthesis.speak(u);
+  });
+}
+// Read note i aloud; with all = true keep going through the rest of the notes
+async function readNotes(i, all) {
+  const deck = notesDeck();
+  if (!canSpeak || !deck || !deck.notes || !deck.notes[i]) return;
+  const id = ++speechId;
+  speechSynthesis.cancel();
+  notesRead = { id, i, all }; speaking = true; paintNotes();
+  for (let n = i; n < deck.notes.length; n++) {
+    if (id !== speechId) return;
+    notesRead.i = n; paintNotes();
+    for (const chunk of speechChunks(deck.notes[n].text)) {
+      await utter(chunk, id);
+      if (id !== speechId) return;
+    }
+    if (!all) break;
+    await wait(700);                   // short pause between notes
+  }
+  if (id === speechId) { notesRead = null; speaking = false; paintNotes(); }
+}
+function stopNotes() { notesRead = null; stopSpeech(); paintNotes(); }
+
+function paintNotes() {                // update the read-aloud buttons in place (no re-render)
+  if (view !== 'notes') return;
+  const r = notesRead && notesRead.id === speechId ? notesRead : null;
+  const all = document.getElementById('nreadall');
+  if (all) all.innerHTML = r && r.all ? icon.stop + ' Stop reading' : icon.speaker + ' Read all aloud';
+  $app.querySelectorAll('[data-say]').forEach(b => {
+    const on = r && r.i === +b.dataset.say;
+    b.innerHTML = on ? icon.stop : icon.speaker;
+    b.setAttribute('aria-label', on ? 'Stop reading' : 'Read this note aloud');
+  });
+  $app.querySelectorAll('[data-note]').forEach(el => {
+    const on = r && r.i === +el.dataset.note;
+    el.classList.toggle('ring-2', !!on); el.classList.toggle('ring-brand', !!on);
+    if (on && r.all) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  });
+}
+
+function renderNotes() {
+  const deck = notesDeck();
+  if (!deck) return go('dashboard');
+  const notes = deck.notes || [];
+  const iconBtn = 'p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition';
+  const noteHTML = (n, i) => editingNote === n.id
+    ? `<div class="rounded-2xl bg-white dark:bg-[#16211d] border border-brand dark:border-brand-light p-4">
+        <textarea id="nedit" rows="4" class="${input}" aria-label="Edit note">${esc(n.text)}</textarea>
+        <div class="flex justify-end gap-2 mt-3">
+          <button data-ncancel class="${btnGhost} !py-2">Cancel</button>
+          <button data-nsave="${n.id}" class="${btnPrimary} !py-2">Save note</button>
+        </div></div>`
+    : `<div data-note="${i}" class="flex items-start gap-3 rounded-2xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 p-4 transition">
+        <span class="shrink-0 w-7 h-7 rounded-full bg-brand/10 dark:bg-brand-light/15 text-brand dark:text-brand-light text-sm font-bold flex items-center justify-center">${i + 1}</span>
+        <p class="flex-1 min-w-0 whitespace-pre-wrap break-words pt-0.5">${esc(n.text)}</p>
+        <div class="flex shrink-0">
+          ${canSpeak ? `<button data-say="${i}" aria-label="Read this note aloud" title="Read aloud" class="${iconBtn}">${icon.speaker}</button>` : ''}
+          <button data-nedit="${n.id}" aria-label="Edit note" title="Edit" class="${iconBtn}">${icon.edit}</button>
+          <button data-ndel="${n.id}" aria-label="Delete note" title="Delete" class="p-2 rounded-lg hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400 transition">${icon.trash}</button>
+        </div></div>`;
+
+  $app.innerHTML = `<div class="max-w-2xl mx-auto">
+    <div class="flex items-center justify-between gap-2 mb-4 flex-wrap">
+      <button id="nback" class="${btnGhost} !py-2">${icon.left} Decks</button>
+      <div class="flex gap-2">
+        <button id="nstudy" class="${btnGhost} !py-2">${icon.play} Study</button>
+        <button id="nquiz" class="${btnGhost} !py-2">Quiz</button>
+      </div>
+    </div>
+    <h1 class="text-3xl font-bold tracking-tight break-words">Notes: ${esc(deck.title)}</h1>
+    <p class="opacity-60 mt-1 mb-6">${notes.length} key note${notes.length === 1 ? '' : 's'} for this module</p>
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      ${canSpeak && notes.length ? `<button id="nreadall" class="${btnPrimary}">${icon.speaker} Read all aloud</button>` : ''}
+      <button id="nimport" class="${btnGhost}">${icon.upload} Import notes</button>
+    </div>
+    ${canSpeak ? `<div class="flex items-center gap-2 mb-6 text-sm flex-wrap">${voiceMenuHTML()}</div>` : '<div class="mb-6"></div>'}
+    <div class="rounded-2xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 p-4 mb-6">
+      <label for="nnew" class="block text-sm font-medium mb-1">Add a key note</label>
+      <textarea id="nnew" rows="3" class="${input}" placeholder="e.g. Epithelium is avascular: it gets nutrients by diffusion from the connective tissue below."></textarea>
+      <div class="flex items-center justify-between gap-3 mt-3 flex-wrap">
+        <p class="text-xs opacity-60">Ctrl + Enter to add</p>
+        <button id="nadd" class="${btnPrimary} !py-2">${icon.plus} Add note</button>
+      </div>
+    </div>
+    ${notes.length ? `<div id="nlist" class="space-y-3">${notes.map(noteHTML).join('')}</div>`
+      : `<div class="text-center py-14 rounded-2xl border-2 border-dashed border-black/15 dark:border-white/15">
+          <p class="text-lg font-medium">No notes yet</p>
+          <p class="opacity-60 mt-1">Write your key points above, or import them from a file or pasted text.</p></div>`}
+  </div>`;
+
+  const $ = id => document.getElementById(id);
+  const find = id => notes.find(n => n.id === id);
+  $('nback').onclick = () => go('dashboard');
+  $('nstudy').onclick = () => {
+    if (!deck.cards.length) return alert('This deck has no cards yet. Edit it to add some.');
+    studyDeck = deck; idx = 0; go('study');
+  };
+  $('nquiz').onclick = () => startQuiz(deck);
+  const add = () => {
+    const text = $('nnew').value.trim();
+    if (!text) return $('nnew').focus();
+    deck.notes = [...notes, { id: uid(), text }];
+    saveNotes(deck); render();
+    $('nnew').focus();
+  };
+  $('nadd').onclick = add;
+  $('nnew').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add(); } };
+  $('nimport').onclick = () => openNotesImport(list => {
+    deck.notes = [...notes, ...list.map(text => ({ id: uid(), text }))];
+    saveNotes(deck); render();
+  });
+  const q = sel => $app.querySelectorAll(sel);
+  q('[data-nedit]').forEach(b => b.onclick = () => { editingNote = b.dataset.nedit; render(); const t = $('nedit'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); });
+  q('[data-ncancel]').forEach(b => b.onclick = () => { editingNote = null; render(); });
+  q('[data-nsave]').forEach(b => b.onclick = () => {
+    const text = $('nedit').value.trim(), n = find(b.dataset.nsave);
+    if (!text) return alert('A note cannot be empty. Use the delete button to remove it.');
+    if (n && n.text !== text) { n.text = text; saveNotes(deck); }
+    editingNote = null; render();
+  });
+  const ed = $('nedit');
+  if (ed) ed.onkeydown = e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $app.querySelector('[data-nsave]').click(); }
+    else if (e.key === 'Escape') { editingNote = null; render(); }
+  };
+  q('[data-ndel]').forEach(b => b.onclick = () => {
+    if (!confirm('Delete this note?')) return;
+    deck.notes = notes.filter(n => n.id !== b.dataset.ndel);
+    saveNotes(deck); render();
+  });
+  if (canSpeak) {
+    bindVoiceSelect();
+    q('[data-say]').forEach(b => b.onclick = () => {
+      const i = +b.dataset.say;
+      if (notesRead && notesRead.id === speechId && notesRead.i === i) return stopNotes();
+      readNotes(i, false);
+    });
+    const all = $('nreadall');
+    if (all) all.onclick = () => (notesRead && notesRead.id === speechId && notesRead.all) ? stopNotes() : readNotes(0, true);
+  }
+  paintNotes();
+}
+
+/* Import notes: paste text or open a .txt/.md file, choose how it is split
+   into notes, preview, then append every note to the deck. */
+function parseNotes(text, mode) {
+  text = String(text).replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+  if (mode === 'one') return [text];
+  const bullet = /^\s*(?:[-*•▪◦–]|\d+[.)])\s+/;
+  const parts = mode === 'para' ? text.split(/\n\s*\n/) : text.split('\n');
+  return parts.map(p => (mode === 'line' ? p.replace(bullet, '') : p.split('\n').map(l => l.replace(bullet, '')).join('\n')).trim()).filter(Boolean);
+}
+function openNotesImport(onDone) {
+  const wrap = document.createElement('div');
+  wrap.className = 'fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4';
+  const radio = (val, label, on) => `<label class="flex items-center gap-2 py-1.5 cursor-pointer"><input type="radio" name="nmode" value="${val}" ${on ? 'checked' : ''} class="accent-teal-700 w-4 h-4"> ${label}</label>`;
+  wrap.innerHTML = `
+    <div role="dialog" aria-modal="true" aria-label="Import notes" class="w-full sm:max-w-2xl max-h-[92vh] overflow-auto rounded-t-2xl sm:rounded-2xl bg-[#f2f6f4] dark:bg-[#0d1512] border border-black/10 dark:border-white/10 p-5 shadow-2xl">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <p><strong>Import notes.</strong> <span class="opacity-70">Paste from Word, Google Docs or a text file, or open a .txt / .md file.</span></p>
+        <button id="ni-close" aria-label="Close" class="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition"><svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <textarea id="ni-text" rows="8" class="${input} text-sm" placeholder="First key note&#10;Second key note&#10;Third key note"></textarea>
+      <div class="flex items-center gap-3 mt-3 flex-wrap">
+        <button id="ni-file" class="${btnGhost} !py-2">${icon.upload} Open a file</button>
+        <span id="ni-fname" class="text-sm opacity-60"></span>
+        <input type="file" id="ni-input" accept=".txt,.md,.markdown,.csv,text/plain,text/markdown" class="hidden">
+      </div>
+      <fieldset class="mt-4"><legend class="font-bold mb-1">Split into notes by</legend>
+        ${radio('line', 'Each line is a note', true)}${radio('para', 'Blank line between notes (paragraphs)')}${radio('one', 'Keep everything as one note')}
+        <p class="text-xs opacity-60 mt-1">Bullet points and numbering (•, -, 1.) at the start of a line are removed.</p>
+      </fieldset>
+      <h3 class="text-lg font-bold mt-5">Preview <span id="ni-count" class="text-sm font-normal opacity-60"></span></h3>
+      <div id="ni-preview" class="mt-2 space-y-1.5 text-sm"></div>
+      <div class="flex justify-end gap-3 mt-5">
+        <button id="ni-cancel" class="${btnGhost}">Cancel</button>
+        <button id="ni-go" class="${btnPrimary} disabled:opacity-40 disabled:pointer-events-none">Import notes</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const $ = sel => wrap.querySelector(sel);
+  let parsed = [];
+  const update = () => {
+    parsed = parseNotes($('#ni-text').value, wrap.querySelector('input[name=nmode]:checked').value);
+    $('#ni-count').textContent = parsed.length + ' note' + (parsed.length === 1 ? '' : 's');
+    $('#ni-go').disabled = !parsed.length;
+    $('#ni-preview').innerHTML = parsed.length
+      ? parsed.slice(0, 8).map((t, i) => `<div class="flex gap-2 p-2 rounded-lg bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10"><span class="opacity-50 tabular-nums">${i + 1}.</span><span class="line-clamp-2 whitespace-pre-wrap break-words">${esc(t)}</span></div>`).join('')
+        + (parsed.length > 8 ? `<p class="opacity-60 pt-1">and ${parsed.length - 8} more</p>` : '')
+      : '<p class="opacity-60">Nothing to preview yet.</p>';
+  };
+  wrap.addEventListener('input', update);
+  wrap.addEventListener('change', e => { if (e.target.name === 'nmode') update(); });
+  const fi = $('#ni-input');
+  $('#ni-file').onclick = () => fi.click();
+  fi.onchange = () => {
+    const f = fi.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      const t = $('#ni-text');
+      t.value = (t.value.trim() ? t.value.replace(/\s*$/, '\n') : '') + String(rd.result);
+      $('#ni-fname').textContent = f.name;
+      update();
+    };
+    rd.onerror = () => alert('That file could not be read. Choose a plain text (.txt) or Markdown (.md) file.');
+    rd.readAsText(f);
+    fi.value = '';
+  };
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('mousedown', e => { if (e.target === wrap) close(); });
+  $('#ni-close').onclick = $('#ni-cancel').onclick = close;
+  $('#ni-go').onclick = () => { onDone(parsed); close(); };
+  update();
+  $('#ni-text').focus();
+}
+
 /* ---------- Study mode ---------- */
 function renderStudy() {
   const total = studyDeck.cards.length;
@@ -966,6 +1236,7 @@ function renderStudy() {
         <div class="flex gap-2">
           <button id="shuffle" class="${btnGhost} !py-2">${icon.shuffle} Shuffle</button>
           <button id="quiz" class="${btnGhost} !py-2">Quiz</button>
+          <button id="notes" class="${btnGhost} !py-2">${icon.notes} Notes</button>
         </div>
       </div>
       <h1 class="text-xl font-bold truncate">${esc(studyDeck.title)}</h1>
@@ -1042,6 +1313,7 @@ function renderStudy() {
   $('next').onclick = () => move(1);
   $('back').onclick = () => go('dashboard');
   $('quiz').onclick = () => startQuiz(studyDeck);
+  $('notes').onclick = () => startNotes(decks.find(d => d.id === studyDeck.id));
   $('shuffle').onclick = () => {
     // Shuffle a COPY so the saved order in localStorage is untouched
     studyDeck = { ...studyDeck, cards: shuffleArr(studyDeck.cards) };
