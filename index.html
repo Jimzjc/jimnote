@@ -286,6 +286,7 @@ function sortItems(list, nameKey, dateKey) {
 const folderModified = f => Math.max(f.created || 0, ...decks.filter(d => d.folderId === f.id).map(d => d.modified || 0));
 const fmtDate = t => t ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
 
+icon.translate = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 5h8M8 3v2M10 5c-.8 3.6-3 6.4-6 8M6 9c1 2 2.8 3.6 5 4.5M13 21l4-9 4 9M14.5 18h5"/></svg>';
 icon.download = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>';
 
 /* ---------- Export as .txt ----------
@@ -1346,8 +1347,9 @@ function renderStudy() {
         <button id="prev" class="${btnGhost}">${icon.left} Previous</button>
         <button id="next" class="${btnPrimary}">Next ${icon.right}</button>
       </div>
-      <div class="flex justify-center mt-3">
+      <div class="flex justify-center gap-3 mt-3 flex-wrap">
         <button id="google" class="${btnGhost} !py-2">${icon.search} Search Google</button>
+        <button id="gtranslate" class="${btnGhost} !py-2" title="Open this side of the card in Google Translate">${icon.translate} Google Translate</button>
       </div>
     </div>`;
 
@@ -1389,12 +1391,11 @@ function renderStudy() {
     studyDeck = { ...studyDeck, cards: shuffleArr(studyDeck.cards) };
     idx = 0; show(1);
   };
-  $('google').onclick = () => {
-    // Searches whichever side of the card you are currently looking at
-    const c = studyDeck.cards[idx];
-    const text = card.classList.contains('flipped') ? backOf(c) : frontOf(c);
-    window.open('https://www.google.com/search?q=' + encodeURIComponent(text), '_blank', 'noopener');
-  };
+  // Both buttons use whichever side of the card you are currently looking at
+  const shownText = () => { const c = studyDeck.cards[idx]; return card.classList.contains('flipped') ? backOf(c) : frontOf(c); };
+  $('google').onclick = () => window.open('https://www.google.com/search?q=' + encodeURIComponent(shownText()), '_blank', 'noopener');
+  // Source language is detected; Google Translate remembers the last target language you picked there
+  $('gtranslate').onclick = () => window.open('https://translate.google.com/?sl=auto&op=translate&text=' + encodeURIComponent(shownText()), '_blank', 'noopener');
   if (canSpeak) {
     const paintAuto = () => {
       $('autoplay').setAttribute('aria-checked', String(autoplay));
