@@ -631,7 +631,10 @@ function renderEditor() {
   const deck = decks.find(d => d.id === editingId);
   const cards = deck ? deck.cards : [{ term: '', definition: '' }, { term: '', definition: '' }, { term: '', definition: '' }];
   $app.innerHTML = `
-    <h1 class="text-3xl font-bold tracking-tight mb-6">${deck ? 'Edit deck' : 'New deck'}</h1>
+    <div class="flex items-center justify-between gap-3 flex-wrap mb-6">
+      <h1 class="text-3xl font-bold tracking-tight">${deck ? 'Edit deck' : 'New deck'}</h1>
+      <button id="savetop" class="${btnPrimary} !py-2">Save deck</button>
+    </div>
     <label class="block text-sm font-medium mb-1" for="title">Title or subject</label>
     <input id="title" class="${input} text-lg mb-4" placeholder="e.g. Spanish – Food vocabulary" value="${deck ? esc(deck.title) : ''}">
     <label class="block text-sm font-medium mb-1" for="folder">Folder</label>
@@ -670,7 +673,8 @@ function renderEditor() {
     imported.forEach(c => addRow(c.term, c.definition));
   });
   document.getElementById('cancel').onclick = () => go('dashboard');
-  document.getElementById('save').onclick = () => {
+  // Two Save buttons (top and bottom of the page) share one handler
+  document.getElementById('save').onclick = document.getElementById('savetop').onclick = () => {
     const title = document.getElementById('title').value.trim();
     // Read every row from the DOM, keep only rows where both fields are filled
     const newCards = [...rows.querySelectorAll('.row')].map(r => ({
