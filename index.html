@@ -472,7 +472,7 @@ function renderDashboard() {
         ${folder ? '' : `<button data-newfolder class="${btnGhost}">${icon.folder.replace('w-6 h-6', 'w-5 h-5')} New folder</button>`}
         ${folder && deckList.length && canSpeak ? `<button data-listen class="${btnGhost}">${icon.speaker} Read aloud</button>` : ''}
         ${folder && deckList.length ? `<button data-mixquiz class="${btnGhost}">${icon.play} Mixed quiz</button>` : ''}
-        ${decks.length && (folder ? deckList.length : true) ? `<button data-starred class="${btnGhost}">${icon.star} Starred cards <span class="text-xs opacity-60">(${starredDeck(currentFolder || '*').cards.length})</span></button>` : ''}
+        ${folder && deckList.length ? `<button data-starred class="${btnGhost}">${icon.star} Starred cards <span class="text-xs opacity-60">(${starredDeck(currentFolder).cards.length})</span></button>` : ''}
         <button data-new class="${btnPrimary}">${icon.plus} Create new deck</button>
       </div>
     </div>
@@ -545,8 +545,8 @@ function renderDashboard() {
   if (ea) ea.onclick = openExport;
   q('[data-search]').forEach(b => b.onclick = openSearch);
   q('[data-starred]').forEach(b => b.onclick = () => {
-    const sd = starredDeck(currentFolder || '*');
-    if (!sd.cards.length) return alert(`No starred cards ${currentFolder ? 'in this folder ' : ''}yet.\n\nWhile studying, tap the ☆ in the top-right corner of a card to star it. You can also turn on "Star cards I get wrong" before a quiz.`);
+    const sd = starredDeck(currentFolder);
+    if (!sd.cards.length) return alert(`No starred cards in this folder yet.\n\nWhile studying, tap the ☆ in the top-right corner of a card to star it. You can also turn on "Star cards I get wrong" before a quiz.`);
     studyDeck = sd; idx = 0; go('study');
   });
   q('[data-new]').forEach(b => b.onclick = () => { editingId = null; go('editor'); });
@@ -1426,14 +1426,14 @@ function openSearch() {
 
 /* ---------- Starred cards ----------
    Any card can be starred (card.starred = true). "Starred cards" on the decks
-   page studies a temporary virtual deck of the starred cards in that folder
-   (or in every deck, on the main page). It is never saved; it remembers which
+   page (inside a folder only) studies a temporary virtual deck of the
+   starred cards in that folder. It is never saved; it remembers which
    folder it came from (starredOf) so a quiz can rebuild it with fresh data. */
 icon.star = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>';
 icon.starFill = icon.star.replace('fill="none"', 'fill="currentColor"');
-function starredDeck(of) {                     // of: folder id, or '*' for every deck
+function starredDeck(of) {                     // of: folder id
   const f = folders.find(x => x.id === of);
-  const src = of === '*' ? decks : decks.filter(d => d.folderId === of);
+  const src = decks.filter(d => d.folderId === of);
   const cards = [];
   sortItems(src, 'title', 'modified').forEach(d => d.cards.forEach(c => { if (c.starred) cards.push(c); }));
   return { id: 'starred:' + of, starredOf: of, title: 'Starred cards' + (f ? ': ' + f.name : ''), cards };
