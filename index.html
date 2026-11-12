@@ -172,13 +172,15 @@ async function gh(path, opts = {}) {
   return res.json();
 }
 
+// A card is {term, definition}, plus starred: true when the user starred it
+const cleanCard = c => c.starred === true ? { term: c.term, definition: c.definition, starred: true } : { term: c.term, definition: c.definition };
 // Rebuild records from known fields only, so a bad file can't inject junk
 function cleanData(data) {
   const isCard = c => c && typeof c.term === 'string' && typeof c.definition === 'string';
   return {
     decks: (data.decks || []).filter(d => d && typeof d.title === 'string' && Array.isArray(d.cards)).map(d => ({
       id: String(d.id || uid()), title: d.title, folderId: d.folderId || null, modified: +d.modified || 0,
-      cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition })), notes: cleanNotes(d.notes) })),
+      cards: d.cards.filter(isCard).map(cleanCard), notes: cleanNotes(d.notes) })),
     folders: (data.folders || []).filter(f => f && typeof f.name === 'string').map(f => ({
       id: String(f.id || uid()), name: f.name, created: +f.created || 0, modified: +f.modified || 0 }))
   };
@@ -410,7 +412,7 @@ function restoreFrom(file) {
       // Re-build every record from known fields only, so a bad file can't inject junk
       const inDecks = (data.decks || []).filter(d => d && typeof d.title === 'string' && Array.isArray(d.cards)).map(d => ({
         id: String(d.id || uid()), title: d.title, folderId: d.folderId || null, modified: +d.modified || 0,
-        cards: d.cards.filter(isCard).map(c => ({ term: c.term, definition: c.definition })), notes: cleanNotes(d.notes)
+        cards: d.cards.filter(isCard).map(cleanCard), notes: cleanNotes(d.notes)
       }));
       const inFolders = (data.folders || []).filter(f => f && typeof f.name === 'string')
         .map(f => ({ id: String(f.id || uid()), name: f.name, created: +f.created || 0 }));
@@ -470,6 +472,7 @@ function renderDashboard() {
         ${folder ? '' : `<button data-newfolder class="${btnGhost}">${icon.folder.replace('w-6 h-6', 'w-5 h-5')} New folder</button>`}
         ${folder && deckList.length && canSpeak ? `<button data-listen class="${btnGhost}">${icon.speaker} Read aloud</button>` : ''}
         ${folder && deckList.length ? `<button data-mixquiz class="${btnGhost}">${icon.play} Mixed quiz</button>` : ''}
+        ${decks.length && (folder ? deckList.length : true) ? `<button data-starred class="${btnGhost}">${icon.star} Starred cards <span class="text-xs opacity-60">(${starredDeck(currentFolder || '*').cards.length})</span></button>` : ''}
         <button data-new class="${btnPrimary}">${icon.plus} Create new deck</button>
       </div>
     </div>
@@ -541,6 +544,11 @@ function renderDashboard() {
   const ea = document.getElementById('exportall');
   if (ea) ea.onclick = openExport;
   q('[data-search]').forEach(b => b.onclick = openSearch);
+  q('[data-starred]').forEach(b => b.onclick = () => {
+    const sd = starredDeck(currentFolder || '*');
+    if (!sd.cards.length) return alert(`No starred cards ${currentFolder ? 'in this folder ' : ''}yet.\n\nWhile studying, tap the ☆ in the top-right corner of a card to star it. You can also turn on "Star cards I get wrong" before a quiz.`);
+    studyDeck = sd; idx = 0; go('study');
+  });
   q('[data-new]').forEach(b => b.onclick = () => { editingId = null; go('editor'); });
   q('[data-edit]').forEach(b => b.onclick = () => { editingId = b.dataset.edit; go('editor'); });
   q('[data-study]').forEach(b => b.onclick = () => {
@@ -634,8 +642,8 @@ function openImport(onDone) {
 }
 
 /* ---------- Deck editor ---------- */
-function rowHTML(t = '', df = '') {
-  return `<div class="row grid grid-cols-[1fr_auto] gap-2 p-3 rounded-xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10">
+function rowHTML(t = '', df = '', starred = false) {
+  return `<div ${starred ? 'data-star="1" ' : ''}class="row grid grid-cols-[1fr_auto] gap-2 p-3 rounded-xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10">
     <div class="grid sm:grid-cols-2 gap-2">
       <input class="${input} term" placeholder="Term" value="${esc(t)}">
       <input class="${input} def" placeholder="Definition" value="${esc(df)}">
@@ -670,8 +678,8 @@ function renderEditor() {
     </div>`;
 
   const rows = document.getElementById('rows');
-  const addRow = (t, d) => rows.insertAdjacentHTML('beforeend', rowHTML(t, d));
-  cards.forEach(c => addRow(c.term, c.definition));
+  const addRow = (t, d, st) => rows.insertAdjacentHTML('beforeend', rowHTML(t, d, st));
+  cards.forEach(c => addRow(c.term, c.definition, c.starred));
 
   // Event delegation: one listener handles every row's remove button
   rows.onclick = e => {
@@ -694,9 +702,10 @@ function renderEditor() {
   document.getElementById('save').onclick = document.getElementById('savetop').onclick = () => {
     const title = document.getElementById('title').value.trim();
     // Read every row from the DOM, keep only rows where both fields are filled
-    const newCards = [...rows.querySelectorAll('.row')].map(r => ({
+    const newCards = [...rows.querySelectorAll('.row')].map(r => cleanCard({
       term: r.querySelector('.term').value.trim(),
-      definition: r.querySelector('.def').value.trim()
+      definition: r.querySelector('.def').value.trim(),
+      starred: r.dataset.star === '1'          // keep stars on cards that were already starred
     })).filter(c => c.term && c.definition);
 
     if (!title) return alert('Please give your deck a title.');
@@ -1415,6 +1424,34 @@ function openSearch() {
   inp.focus(); inp.select();
 }
 
+/* ---------- Starred cards ----------
+   Any card can be starred (card.starred = true). "Starred cards" on the decks
+   page studies a temporary virtual deck of the starred cards in that folder
+   (or in every deck, on the main page). It is never saved; it remembers which
+   folder it came from (starredOf) so a quiz can rebuild it with fresh data. */
+icon.star = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>';
+icon.starFill = icon.star.replace('fill="none"', 'fill="currentColor"');
+function starredDeck(of) {                     // of: folder id, or '*' for every deck
+  const f = folders.find(x => x.id === of);
+  const src = of === '*' ? decks : decks.filter(d => d.folderId === of);
+  const cards = [];
+  sortItems(src, 'title', 'modified').forEach(d => d.cards.forEach(c => { if (c.starred) cards.push(c); }));
+  return { id: 'starred:' + of, starredOf: of, title: 'Starred cards' + (f ? ': ' + f.name : ''), cards };
+}
+// The saved deck a card belongs to (matched by object, or by text after a sync replaced the objects)
+const ownerOf = c => decks.find(d => d.cards.includes(c))
+  || decks.find(d => d.cards.some(x => x.term === c.term && x.definition === c.definition));
+function setStar(c, on) {
+  const d = ownerOf(c); if (!d) return;
+  const real = d.cards.includes(c) ? c : d.cards.find(x => x.term === c.term && x.definition === c.definition);
+  if (!!real.starred === on) return;
+  if (on) real.starred = true; else delete real.starred;
+  if (real !== c) { if (on) c.starred = true; else delete c.starred; }
+  d.modified = Date.now();                    // so sync carries the change to other devices
+  saveDecks();
+}
+let autoStar = (() => { try { return localStorage.getItem('deckly:autostar') === '1'; } catch (e) { return false; } })();
+
 /* ---------- Study mode ---------- */
 function renderStudy() {
   const total = studyDeck.cards.length;
@@ -1425,7 +1462,7 @@ function renderStudy() {
         <div class="flex gap-2">
           <button id="shuffle" class="${btnGhost} !py-2">${icon.shuffle} Shuffle</button>
           <button id="quiz" class="${btnGhost} !py-2">Quiz</button>
-          <button id="notes" class="${btnGhost} !py-2">${icon.notes} Notes</button>
+          ${studyDeck.starredOf || studyDeck.mixIds ? '' : `<button id="notes" class="${btnGhost} !py-2">${icon.notes} Notes</button>`}
         </div>
       </div>
       <h1 class="text-xl font-bold truncate">${esc(studyDeck.title)}</h1>
@@ -1437,7 +1474,8 @@ function renderStudy() {
         <div class="flex items-center gap-2 text-sm"><span class="opacity-60">Show first</span>${firstToggle()}</div>
       </div>
 
-      <div id="slide">
+      <div id="slide" class="relative">
+        <button id="star" aria-pressed="false"></button>
         <div class="scene">
           <div id="card" role="button" tabindex="0" aria-label="Flip card" class="card relative h-72 sm:h-80 cursor-pointer select-none">
             <div class="face absolute inset-0 rounded-3xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 shadow-lg flex flex-col items-center justify-center p-8 text-center">
@@ -1482,7 +1520,8 @@ function renderStudy() {
     $('back-text').textContent = backOf(c);
     $('front-label').textContent = sideName(first);
     $('back-label').textContent = sideName(first === 'term' ? 'def' : 'term');
-    $('count').textContent = `Card ${idx + 1} of ${total}`;
+    $('count').textContent = `Card ${idx + 1} of ${total}` + (studyDeck.starredOf ? ` · from ${(ownerOf(c) || {}).title || 'a deleted deck'}` : '');
+    paintStar();
     $('bar').style.width = ((idx + 1) / total * 100) + '%';
     ['prev', 'next'].forEach(id => {
       const off = id === 'prev' ? idx === 0 : idx === total - 1;
@@ -1505,7 +1544,18 @@ function renderStudy() {
   $('back').onclick = () => go('dashboard');
   $('keys').onclick = openShortcuts;
   $('quiz').onclick = () => startQuiz(studyDeck);
-  $('notes').onclick = () => startNotes(decks.find(d => d.id === studyDeck.id));
+  if ($('notes')) $('notes').onclick = () => startNotes(decks.find(d => d.id === studyDeck.id));
+  // Star: hollow = not starred, filled = starred. Starred-cards view keeps an unstarred card until you leave.
+  function paintStar() {
+    const on = !!studyDeck.cards[idx].starred, b = $('star');
+    b.innerHTML = on ? icon.starFill : icon.star;
+    b.className = 'absolute top-3 right-3 z-20 p-2 rounded-full bg-white/85 dark:bg-black/40 shadow transition hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light '
+      + (on ? 'text-amber-500' : 'text-black/60 dark:text-white/80');
+    b.setAttribute('aria-pressed', String(on));
+    b.setAttribute('aria-label', on ? 'Unstar this card' : 'Star this card');
+    b.title = on ? 'Starred (click to unstar)' : 'Star this card';
+  }
+  $('star').onclick = e => { e.stopPropagation(); const c = studyDeck.cards[idx]; setStar(c, !c.starred); paintStar(); };
   $('shuffle').onclick = () => {
     // Shuffle a COPY so the saved order in localStorage is untouched
     studyDeck = { ...studyDeck, cards: shuffleArr(studyDeck.cards) };
@@ -1577,7 +1627,7 @@ function fmtTime(sec) { return Math.floor(sec / 60) + ':' + String(sec % 60).pad
 // Bump this whenever the question-generation algorithm changes. Two devices only
 // produce identical quizzes if they run the same engine version.
 const QUIZ_ENGINE = 2;
-const quizId = qs => hashSeed(JSON.stringify(qs))().toString(16).toUpperCase().padStart(8, '0').slice(0, 6);
+const quizId = qs => hashSeed(JSON.stringify(qs, ['prompt', 'answer', 'options']))().toString(16).toUpperCase().padStart(8, '0').slice(0, 6);
 
 // Seconds on the stopwatch: runs up from 0 and freezes once the last answer is given
 const elapsedSec = q => Math.floor(((q.finishedAt || Date.now()) - q.startedAt) / 1000);
@@ -1594,7 +1644,7 @@ function buildSeeded(deck, seed, side) {
   const pool = [...new Set(cards.map(back))];
   return picked.map(c => {
     const wrong = shuffleWith(rng, pool.filter(t => t !== back(c))).slice(0, 3);
-    return { prompt: front(c), answer: back(c), options: shuffleWith(rng, [back(c), ...wrong]) };
+    return { prompt: front(c), answer: back(c), options: shuffleWith(rng, [back(c), ...wrong]), card: c };
   });
 }
 
@@ -1666,7 +1716,7 @@ function mixDeck(ids, folderId) {
     title: (f ? f.name + ': ' : '') + ds.length + ' deck' + (ds.length === 1 ? '' : 's') + ' mixed', cards };
 }
 // Latest copy of a quiz deck (rebuilds a mixed deck from its source decks)
-const freshDeck = d => d.mixIds ? (mixDeck(d.mixIds, d.folderId).cards.length ? mixDeck(d.mixIds, d.folderId) : d)
+const freshDeck = d => d.starredOf ? (starredDeck(d.starredOf).cards.length >= 2 ? starredDeck(d.starredOf) : d) : d.mixIds ? (mixDeck(d.mixIds, d.folderId).cards.length ? mixDeck(d.mixIds, d.folderId) : d)
   : (decks.find(x => x.id === d.id) || d);
 
 function startMixPick(folderId) {
@@ -1723,7 +1773,7 @@ function buildQuiz(deck, n) {
   return shuffleArr(deck.cards).slice(0, n).map(c => {
     const answer = backOf(c);
     const wrong = shuffleArr([...new Set(deck.cards.map(backOf))].filter(t => t !== answer)).slice(0, 3);
-    return { prompt: frontOf(c), answer, options: shuffleArr([answer, ...wrong]) };
+    return { prompt: frontOf(c), answer, options: shuffleArr([answer, ...wrong]), card: c };
   });
 }
 
@@ -1747,6 +1797,8 @@ function renderQuiz() {
       <p class="font-medium mb-2">Each question shows the</p>${firstToggle()}
       <p class="font-medium mt-6 mb-2">When I get one wrong</p>${wrongToggle()}
       <p class="text-sm opacity-60 mt-2">Correct answers move on automatically.</p>
+      <label class="flex items-center gap-3 mt-4 cursor-pointer w-fit"><input id="autostar" type="checkbox" ${autoStar ? 'checked' : ''} class="w-5 h-5 accent-teal-700">
+        <span><span class="font-medium">${icon.star.replace('w-5 h-5', 'w-4 h-4 inline -mt-1')} Star cards I get wrong</span><span class="block text-sm opacity-60">Missed cards are added to Starred cards so you can study them later.</span></span></label>
       <p class="font-medium mt-6 mb-2">How many terms?</p>
       <div class="grid sm:grid-cols-3 gap-3">
         ${[[10, '10 terms'], [20, '20 terms'], [total, `All terms (${total})`]].map(([n, l]) =>
@@ -1754,6 +1806,10 @@ function renderQuiz() {
       </div>${timedPanelHTML(q)}</div>`;
     bindFirstToggle($app);
     bindWrongToggle($app);
+    document.getElementById('autostar').onchange = e => {
+      autoStar = e.target.checked;
+      try { localStorage.setItem('deckly:autostar', autoStar ? '1' : '0'); } catch (err) {}
+    };
     bindTimed(q);
     $app.querySelectorAll('[data-n]').forEach(b => b.onclick = () => {
       const n = +b.dataset.n;
@@ -1851,7 +1907,7 @@ function renderQuiz() {
         // Timed quiz: one attempt per question. Streak scoring: the nth correct answer
         // in a row is worth n points; a wrong answer is worth 0 and resets the streak.
         if (right) { q.streak++; q.gain = q.streak; q.score += q.gain; q.correct++; q.done = 'correct'; }
-        else { q.streak = 0; q.gain = 0; q.tried.push(k); q.wrong.push(cur); q.done = 'revealed'; }
+        else { q.streak = 0; q.gain = 0; q.tried.push(k); q.wrong.push(cur); q.done = 'revealed'; if (autoStar && cur.card) setStar(cur.card, true); }
         if (last) q.finishedAt = Date.now();     // freeze the clock on the final answer
         render();                                // no auto-advance: the player clicks Next
         return;
@@ -1862,7 +1918,7 @@ function renderQuiz() {
         render(); later(900);
       } else {
         q.tried.push(k);
-        if (q.tried.length === 1) q.wrong.push(cur); // first miss goes on the review list
+        if (q.tried.length === 1) { q.wrong.push(cur); if (autoStar && cur.card) setStar(cur.card, true); } // first miss goes on the review list
         if (wrongMode === 'show') q.done = 'revealed'; // otherwise stay open so they can retry
         render();
       }
@@ -1902,13 +1958,26 @@ function renderQuiz() {
       <p class="text-sm opacity-70">Seed <span class="font-mono font-bold">${q.seed}</span> · Questions show ${sideName(q.side).toLowerCase()} · Deck check <span class="font-mono">${fmtPrint(q.print)}</span> · Quiz ID <span class="font-mono">${q.qid}</span> · Engine v${QUIZ_ENGINE}</p>` : ''}
     </div>
     ${q.wrong.length ? `<h2 class="text-lg font-bold mt-6 mb-2">Review missed</h2>
-      <div class="space-y-2">${q.wrong.map(w => `<div class="p-3 rounded-xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10"><p class="font-medium break-words">${esc(w.prompt)}</p><p class="text-sm text-emerald-700 dark:text-emerald-400 break-words">${esc(w.answer)}</p></div>`).join('')}</div>` : ''}
+      ${autoStar && q.wrong.some(w => w.card) ? `<p class="text-sm opacity-70 -mt-1 mb-2">Missed cards were starred automatically.</p>` : ''}
+      <div class="space-y-2">${q.wrong.map((w, k) => `<div class="flex items-start gap-3 p-3 rounded-xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10"><div class="flex-1 min-w-0"><p class="font-medium break-words">${esc(w.prompt)}</p><p class="text-sm text-emerald-700 dark:text-emerald-400 break-words">${esc(w.answer)}</p></div>${w.card ? `<button data-wstar="${k}"></button>` : ''}</div>`).join('')}</div>` : ''}
     <div class="flex flex-wrap gap-3 mt-6">
       ${q.wrong.length ? `<button id="retry" class="${btnPrimary}">Retry missed</button>` : ''}
       <button id="retake" class="${q.wrong.length ? btnGhost : btnPrimary}">New quiz</button>
       ${q.timed ? `<button id="reseed" class="${btnGhost}">Retake this seed</button>` : ''}
       <button id="studydeck" class="${btnGhost}">Study deck</button>
     </div></div>`;
+  $app.querySelectorAll('[data-wstar]').forEach(b => {
+    const c = q.wrong[+b.dataset.wstar].card;
+    const paint = () => {
+      b.innerHTML = c.starred ? icon.starFill : icon.star;
+      b.className = 'shrink-0 p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 transition ' + (c.starred ? 'text-amber-500' : 'opacity-70');
+      b.setAttribute('aria-pressed', String(!!c.starred));
+      b.setAttribute('aria-label', c.starred ? 'Unstar this card' : 'Star this card');
+      b.title = c.starred ? 'Starred (click to unstar)' : 'Star this card';
+    };
+    paint();
+    b.onclick = () => { setStar(c, !c.starred); paint(); };
+  });
   const again = list => Object.assign(quiz, { stage: 'q', qs: list, i: 0, score: 0, tried: [], done: false, wrong: [], timed: false });
   const r = document.getElementById('retry');
   if (r) r.onclick = () => { again(shuffleArr(q.wrong).map(x => ({ ...x, options: shuffleArr(x.options) }))); render(); };
@@ -1952,6 +2021,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'r') click('listen');
   else if (k === 'a') click('autoplay');
   else if (k === 's') click('shuffle');
+  else if (k === 'f') click('star');
   else if (k === 'q') click('quiz');
   else if (k === 'n') click('notes');
   else if (k === 'g') click('google');
@@ -1964,7 +2034,7 @@ document.addEventListener('keydown', e => {
 function openShortcuts() {
   const keys = [['Space / Enter', 'Flip the card'], ['← →', 'Previous / next card'], ['Home / End', 'First / last card'],
     ...(canSpeak ? [['R', 'Read the side showing aloud (again to stop)'], ['A', 'Autoplay on / off']] : []),
-    ['S', 'Shuffle'], ['Q', 'Quiz this deck'], ['N', 'Notes'], ['G', 'Search Google'], ['T', 'Google Translate'],
+    ['F', 'Star / unstar the card'], ['S', 'Shuffle'], ['Q', 'Quiz this deck'], ['N', 'Notes'], ['G', 'Search Google'], ['T', 'Google Translate'],
     ['Esc', 'Back to decks'], ['?', 'Show this list'], ['/', 'Search cards (on the decks page)']];
   const kbd = t => t.split(' / ').map(x => `<kbd class="inline-block min-w-[1.75rem] text-center px-1.5 py-0.5 rounded-md border border-black/20 dark:border-white/20 bg-white dark:bg-[#16211d] text-sm font-mono">${x}</kbd>`).join(' ');
   const wrap = document.createElement('div');
