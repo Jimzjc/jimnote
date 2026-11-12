@@ -463,7 +463,8 @@ function renderDashboard() {
   $app.innerHTML = `
     ${folder ? `<button data-up class="${btnGhost} !py-2 mb-4">${icon.left} All decks</button>` : ''}
     <div class="flex items-end justify-between gap-4 mb-6 flex-wrap">
-      <div><h1 class="text-3xl sm:text-4xl font-bold tracking-tight break-words">${folder ? esc(folder.name) : 'Your decks'}</h1>
+      <div><div class="flex items-center gap-2"><h1 class="text-3xl sm:text-4xl font-bold tracking-tight break-words">${folder ? esc(folder.name) : 'Your decks'}</h1>
+        ${decks.length ? `<button data-search aria-label="Search cards" title="Search cards (/)" class="p-2 rounded-lg opacity-70 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10 transition">${icon.search}</button>` : ''}</div>
       <p class="opacity-60 mt-1">${folder ? deckList.length + ' deck' + (deckList.length === 1 ? '' : 's') + ' in this folder' : 'Saved on this device'}</p></div>
       <div class="flex gap-2 flex-wrap">
         ${folder ? '' : `<button data-newfolder class="${btnGhost}">${icon.folder.replace('w-6 h-6', 'w-5 h-5')} New folder</button>`}
@@ -539,6 +540,7 @@ function renderDashboard() {
   if (bk) bk.onclick = backupAll;
   const ea = document.getElementById('exportall');
   if (ea) ea.onclick = openExport;
+  q('[data-search]').forEach(b => b.onclick = openSearch);
   q('[data-new]').forEach(b => b.onclick = () => { editingId = null; go('editor'); });
   q('[data-edit]').forEach(b => b.onclick = () => { editingId = b.dataset.edit; go('editor'); });
   q('[data-study]').forEach(b => b.onclick = () => {
@@ -1297,6 +1299,122 @@ function openNotesImport(onDone) {
   $('#ni-text').focus();
 }
 
+/* ---------- Search cards ----------
+   Magnifying glass on the decks page. "Search Folder" looks through every
+   deck in a folder (or all decks); "Search Deck" looks through one deck.
+   Matching ignores capitals but is otherwise exact (no fuzzy spelling) and
+   starts at 3 characters. Clicking a result opens that card in study mode. */
+let searchPrefs = { mode: 'folder', q: '' };   // remembered while the page is open
+function openSearch() {
+  if (!decks.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'fixed inset-0 z-50 bg-black/50 flex items-start justify-center p-0 sm:p-4 sm:pt-[10vh]';
+  const byTitle = (a, b) => a.title.localeCompare(b.title);
+  const loose = decks.filter(d => !d.folderId).sort(byTitle);
+  const deckOpts = [
+    ...folders.map(f => [f.name, decks.filter(d => d.folderId === f.id).sort(byTitle)]).filter(([, ds]) => ds.length)
+      .map(([name, ds]) => `<optgroup label="${esc(name)}">${ds.map(d => `<option value="${d.id}">${esc(d.title)}</option>`).join('')}</optgroup>`),
+    loose.length ? (folders.length ? `<optgroup label="No folder">` : '') + loose.map(d => `<option value="${d.id}">${esc(d.title)}</option>`).join('') + (folders.length ? '</optgroup>' : '') : ''
+  ].join('');
+  const folderOpts = `<option value="*">All decks</option>` + folders.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('')
+    + (folders.length && loose.length ? `<option value="-">Decks not in a folder</option>` : '');
+  const tab = (m, label) => `<button data-smode="${m}" class="flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition">${label}</button>`;
+  wrap.innerHTML = `
+    <div role="dialog" aria-modal="true" aria-label="Search cards" class="w-full sm:max-w-2xl h-full sm:h-auto sm:max-h-[80vh] flex flex-col sm:rounded-2xl bg-[#f2f6f4] dark:bg-[#0d1512] border border-black/10 dark:border-white/10 p-4 sm:p-5 shadow-2xl">
+      <div class="flex items-center gap-2">
+        <div class="relative flex-1">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 opacity-50 pointer-events-none">${icon.search}</span>
+          <input id="s-q" type="search" autocomplete="off" spellcheck="false" placeholder="Search for a word…" class="${input} !pl-10">
+        </div>
+        <button id="s-close" aria-label="Close search" class="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition"><svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <div class="flex gap-1 p-1 rounded-lg bg-black/5 dark:bg-white/10 w-full sm:w-auto">${tab('folder', 'Search Folder')}${tab('deck', 'Search Deck')}</div>
+        <select id="s-folder" aria-label="Folder to search" class="${input} !w-auto !py-1.5 flex-1 min-w-0">${folderOpts}</select>
+        <select id="s-deck" aria-label="Deck to search" class="${input} !w-auto !py-1.5 flex-1 min-w-0">${deckOpts}</select>
+      </div>
+      <p id="s-info" class="text-sm opacity-60 mt-3"></p>
+      <div id="s-results" class="mt-2 space-y-1.5 overflow-auto min-h-0"></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const $ = sel => wrap.querySelector(sel);
+  const inp = $('#s-q'), selF = $('#s-folder'), selD = $('#s-deck');
+  // Start from where the user is: the open folder, or the first deck shown on the page
+  selF.value = currentFolder || '*';
+  const here = decks.filter(d => (d.folderId || null) === currentFolder);
+  if (here.length) selD.value = sortItems(here, 'title', 'modified')[0].id;
+  inp.value = searchPrefs.q;
+
+  const lower = t => String(t).toLowerCase();
+  // Escape text and wrap every case-insensitive match in <mark>
+  const mark = (text, needle) => {
+    const t = String(text), lt = lower(t);
+    if (lt.length !== t.length) return esc(t);          // rare characters change length when lowercased
+    let out = '', i = 0, j;
+    while ((j = lt.indexOf(needle, i)) !== -1) {
+      out += esc(t.slice(i, j)) + `<mark class="rounded px-0.5 bg-amber-200 text-black dark:bg-amber-400">${esc(t.slice(j, j + needle.length))}</mark>`;
+      i = j + needle.length;
+    }
+    return out + esc(t.slice(i));
+  };
+  const LIMIT = 100;
+  let hits = [];
+  const update = () => {
+    const mode = searchPrefs.mode;
+    wrap.querySelectorAll('[data-smode]').forEach(b => {
+      const on = b.dataset.smode === mode;
+      b.setAttribute('aria-pressed', String(on));
+      b.classList.toggle('bg-white', on); b.classList.toggle('dark:bg-[#16211d]', on); b.classList.toggle('shadow', on);
+      b.classList.toggle('opacity-60', !on);
+    });
+    selF.style.display = mode === 'folder' ? '' : 'none';
+    selD.style.display = mode === 'deck' ? '' : 'none';
+    const needle = lower(inp.value.trim());
+    searchPrefs.q = inp.value;
+    const pool = mode === 'deck' ? decks.filter(d => d.id === selD.value)
+      : selF.value === '*' ? decks : selF.value === '-' ? decks.filter(d => !d.folderId) : decks.filter(d => d.folderId === selF.value);
+    hits = [];
+    if (needle.length >= 3) {
+      for (const d of sortItems(pool, 'title', 'modified'))
+        d.cards.forEach((c, i) => { if (lower(c.term).includes(needle) || lower(c.definition).includes(needle)) hits.push({ d, c, i }); });
+    }
+    const n = hits.length;
+    $('#s-info').textContent = needle.length < 3
+      ? (needle.length ? `Type ${3 - needle.length} more character${needle.length === 2 ? '' : 's'}…` : 'Type at least 3 characters. Capitals don’t matter.')
+      : n ? `${n} card${n === 1 ? '' : 's'} found${n > LIMIT ? ` (showing the first ${LIMIT})` : ''}` : `No cards contain “${inp.value.trim()}”.`;
+    const fname = d => { const f = d.folderId && folders.find(x => x.id === d.folderId); return f ? esc(f.name) + ' › ' : ''; };
+    $('#s-results').innerHTML = hits.slice(0, LIMIT).map((h, k) => `
+      <button data-hit="${k}" class="w-full text-left p-3 rounded-xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 hover:border-brand dark:hover:border-brand-light focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light transition">
+        <span class="block font-bold break-words">${mark(h.c.term, needle)}</span>
+        <span class="block text-sm opacity-80 break-words line-clamp-3">${mark(h.c.definition, needle)}</span>
+        ${mode === 'folder' ? `<span class="block text-xs opacity-50 mt-1 truncate">${fname(h.d)}${esc(h.d.title)} · card ${h.i + 1}</span>` : `<span class="block text-xs opacity-50 mt-1">Card ${h.i + 1}</span>`}
+      </button>`).join('');
+  };
+  const openHit = k => {
+    const h = hits[k]; if (!h) return;
+    close();
+    studyDeck = h.d; idx = h.i; go('study');
+  };
+  inp.addEventListener('input', update);
+  selF.onchange = selD.onchange = update;
+  wrap.querySelectorAll('[data-smode]').forEach(b => b.onclick = () => { searchPrefs.mode = b.dataset.smode; update(); inp.focus(); });
+  $('#s-results').onclick = e => { const b = e.target.closest('[data-hit]'); if (b) openHit(+b.dataset.hit); };
+  // Keyboard: Enter opens the first result, ↓/↑ move between results
+  wrap.addEventListener('keydown', e => {
+    const items = [...wrap.querySelectorAll('[data-hit]')], at = items.indexOf(document.activeElement);
+    if (e.key === 'Enter' && e.target === inp) { e.preventDefault(); openHit(0); }
+    else if (e.key === 'ArrowDown' && items.length && (e.target === inp || at >= 0)) { e.preventDefault(); items[Math.min(at + 1, items.length - 1)].focus(); }
+    else if (e.key === 'ArrowUp' && at >= 0) { e.preventDefault(); (at === 0 ? inp : items[at - 1]).focus(); }
+  });
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('mousedown', e => { if (e.target === wrap) close(); });
+  $('#s-close').onclick = close;
+  update();
+  inp.focus(); inp.select();
+}
+
 /* ---------- Study mode ---------- */
 function renderStudy() {
   const total = studyDeck.cards.length;
@@ -1333,7 +1451,8 @@ function renderStudy() {
           </div>
         </div>
       </div>
-      <p class="text-center text-sm opacity-50 mt-4">Click the card or press Space to flip. Use ← → to navigate.</p>
+      <p class="text-center text-sm opacity-50 mt-4">Click the card or press Space to flip. Use ← → to navigate.
+        <button id="keys" class="underline hover:opacity-100">Keyboard shortcuts (?)</button></p>
 
       ${canSpeak ? `<div class="flex items-center justify-center gap-4 mt-5 flex-wrap">
         <button id="listen" aria-label="Read aloud" class="${btnGhost} !py-2">${icon.speaker} Listen</button>
@@ -1384,6 +1503,7 @@ function renderStudy() {
   $('prev').onclick = () => move(-1);
   $('next').onclick = () => move(1);
   $('back').onclick = () => go('dashboard');
+  $('keys').onclick = openShortcuts;
   $('quiz').onclick = () => startQuiz(studyDeck);
   $('notes').onclick = () => startNotes(decks.find(d => d.id === studyDeck.id));
   $('shuffle').onclick = () => {
@@ -1813,14 +1933,58 @@ document.addEventListener('keydown', e => {
     else if (e.key === ' ' && document.activeElement.tagName !== 'BUTTON') { e.preventDefault(); lst.playing ? listenPause() : listenPlay(); }
     return;
   }
-  if (view !== 'study' || /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
-  if (e.key === 'ArrowRight') document.getElementById('next').click();
-  else if (e.key === 'ArrowLeft') document.getElementById('prev').click();
-  else if (e.key === ' ' || e.key === 'Enter') {
+  // Ignore keys while typing, in a dropdown, inside a pop-up, or with Ctrl/Cmd/Alt (browser shortcuts)
+  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.querySelector('[aria-modal="true"]')
+      || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (view === 'dashboard' && e.key === '/' && decks.length) { e.preventDefault(); openSearch(); return; }
+  if (view !== 'study') return;
+  const click = id => document.getElementById(id)?.click();
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (k === 'ArrowRight') click('next');
+  else if (k === 'ArrowLeft') click('prev');
+  else if (k === ' ' || k === 'Enter') {
     if (document.activeElement.tagName === 'BUTTON') return;   // let focused buttons (Listen, Autoplay...) work
-    e.preventDefault(); document.getElementById('card').click();
+    e.preventDefault(); click('card');
   }
+  else if (k === 'Home' || k === 'End') {                       // first / last card
+    e.preventDefault(); idx = k === 'Home' ? 0 : studyDeck.cards.length - 1; render();
+  }
+  else if (k === 'r') click('listen');
+  else if (k === 'a') click('autoplay');
+  else if (k === 's') click('shuffle');
+  else if (k === 'q') click('quiz');
+  else if (k === 'n') click('notes');
+  else if (k === 'g') click('google');
+  else if (k === 't') click('gtranslate');
+  else if (k === 'Escape') click('back');
+  else if (k === '?') openShortcuts();
 });
+
+// Pop-up listing the study-mode keys
+function openShortcuts() {
+  const keys = [['Space / Enter', 'Flip the card'], ['← →', 'Previous / next card'], ['Home / End', 'First / last card'],
+    ...(canSpeak ? [['R', 'Read the side showing aloud (again to stop)'], ['A', 'Autoplay on / off']] : []),
+    ['S', 'Shuffle'], ['Q', 'Quiz this deck'], ['N', 'Notes'], ['G', 'Search Google'], ['T', 'Google Translate'],
+    ['Esc', 'Back to decks'], ['?', 'Show this list'], ['/', 'Search cards (on the decks page)']];
+  const kbd = t => t.split(' / ').map(x => `<kbd class="inline-block min-w-[1.75rem] text-center px-1.5 py-0.5 rounded-md border border-black/20 dark:border-white/20 bg-white dark:bg-[#16211d] text-sm font-mono">${x}</kbd>`).join(' ');
+  const wrap = document.createElement('div');
+  wrap.className = 'fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4';
+  wrap.innerHTML = `
+    <div role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" class="w-full sm:max-w-md max-h-[92vh] overflow-auto rounded-t-2xl sm:rounded-2xl bg-[#f2f6f4] dark:bg-[#0d1512] border border-black/10 dark:border-white/10 p-5 shadow-2xl">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <p class="font-bold text-lg">Keyboard shortcuts</p>
+        <button id="k-close" aria-label="Close" class="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition"><svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <dl class="divide-y divide-black/10 dark:divide-white/10">${keys.map(([k, d]) => `<div class="flex items-center justify-between gap-4 py-2"><dt>${kbd(k)}</dt><dd class="text-sm opacity-80 text-right">${d}</dd></div>`).join('')}</dl>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape' || e.key === '?') { e.preventDefault(); close(); } };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('mousedown', e => { if (e.target === wrap) close(); });
+  wrap.querySelector('#k-close').onclick = close;
+  wrap.querySelector('#k-close').focus();
+}
 
 /* Header controls */
 document.getElementById('home').onclick = () => { currentFolder = null; go('dashboard'); };
