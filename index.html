@@ -1055,6 +1055,7 @@ function renderListenPlay() {
    spoken, because some browsers silently stop very long utterances. */
 icon.notes = '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
 let notesDeckId = null;      // deck whose notes page is open
+let notesAddOpen = false;    // is the "+ Add" panel open?
 let editingNote = null;      // id of the note being edited inline (null = none)
 let notesRead = null;        // {id, i, all} while reading aloud; id matches speechId
 
@@ -1065,6 +1066,7 @@ const notesDeck = () => decks.find(d => d.id === notesDeckId);
 function startNotes(deck) {
   if (!deck) return;
   notesDeckId = deck.id; editingNote = null;
+  notesAddOpen = !(deck.notes && deck.notes.length);   // open the Add panel straight away when there are no notes yet
   go('notes');
 }
 function saveNotes(deck) {
@@ -1168,22 +1170,29 @@ function renderNotes() {
     <h1 class="text-3xl font-bold tracking-tight break-words">Notes: ${esc(deck.title)}</h1>
     <p class="opacity-60 mt-1 mb-6">${notes.length} key note${notes.length === 1 ? '' : 's'} for this module</p>
     <div class="flex flex-wrap items-center gap-2 mb-3">
-      ${canSpeak && notes.length ? `<button id="nreadall" class="${btnPrimary}">${icon.speaker} Read all aloud</button>` : ''}
-      <button id="nimport" class="${btnGhost}">${icon.upload} Import notes</button>
+      <button id="naddopen" aria-expanded="${notesAddOpen}" aria-controls="naddpanel" class="${notesAddOpen ? btnGhost : btnPrimary}">${icon.plus} Add</button>
+      ${canSpeak && notes.length ? `<button id="nreadall" class="${btnGhost}">${icon.speaker} Read all aloud</button>` : ''}
     </div>
-    ${canSpeak ? `<div class="flex items-center gap-2 mb-6 text-sm flex-wrap">${voiceMenuHTML()}</div>` : '<div class="mb-6"></div>'}
-    <div class="rounded-2xl bg-white dark:bg-[#16211d] border border-black/10 dark:border-white/10 p-4 mb-6">
-      <label for="nnew" class="block text-sm font-medium mb-1">Add a key note</label>
+    ${notesAddOpen ? `<div id="naddpanel" class="rounded-2xl bg-white dark:bg-[#16211d] border border-brand dark:border-brand-light p-4 mb-3">
+      <div class="flex items-center justify-between gap-3 mb-2">
+        <label for="nnew" class="text-sm font-medium">Type a key note</label>
+        <button id="naddclose" aria-label="Close" title="Close" class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition"><svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
       <textarea id="nnew" rows="3" class="${input}" placeholder="e.g. Epithelium is avascular: it gets nutrients by diffusion from the connective tissue below."></textarea>
       <div class="flex items-center justify-between gap-3 mt-3 flex-wrap">
-        <p class="text-xs opacity-60">Ctrl + Enter to add</p>
-        <button id="nadd" class="${btnPrimary} !py-2">${icon.plus} Add note</button>
+        <button id="nimport" class="${btnGhost} !py-2">${icon.upload} Import notes</button>
+        <div class="flex items-center gap-3">
+          <span class="hidden sm:inline text-xs opacity-60">Ctrl + Enter to add</span>
+          <button id="nadd" class="${btnPrimary} !py-2">${icon.plus} Add note</button>
+        </div>
       </div>
-    </div>
+      <p class="text-xs opacity-60 mt-2">Import notes from a .txt / .md file or pasted text.</p>
+    </div>` : ''}
+    ${canSpeak ? `<div class="flex items-center gap-2 mb-6 text-sm flex-wrap">${voiceMenuHTML()}</div>` : '<div class="mb-6"></div>'}
     ${notes.length ? `<div id="nlist" class="space-y-3">${notes.map(noteHTML).join('')}</div>`
       : `<div class="text-center py-14 rounded-2xl border-2 border-dashed border-black/15 dark:border-white/15">
           <p class="text-lg font-medium">No notes yet</p>
-          <p class="opacity-60 mt-1">Write your key points above, or import them from a file or pasted text.</p></div>`}
+          <p class="opacity-60 mt-1">Press <strong>+ Add</strong> to type your key points, or import them from a file or pasted text.</p></div>`}
   </div>`;
 
   const $ = id => document.getElementById(id);
@@ -1201,12 +1210,22 @@ function renderNotes() {
     saveNotes(deck); render();
     $('nnew').focus();
   };
-  $('nadd').onclick = add;
-  $('nnew').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add(); } };
-  $('nimport').onclick = () => openNotesImport(list => {
-    deck.notes = [...notes, ...list.map(text => ({ id: uid(), text }))];
-    saveNotes(deck); render();
-  });
+  // "+ Add" opens a panel at the top: type a note, or import several. It stays open for quick adding.
+  $('naddopen').onclick = () => { notesAddOpen = !notesAddOpen; render(); if (notesAddOpen) $('nnew').focus(); };
+  if (notesAddOpen) {
+    const keep = $('nnew');
+    $('naddclose').onclick = () => { notesAddOpen = false; render(); };
+    $('nadd').onclick = add;
+    keep.onkeydown = e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add(); }
+      else if (e.key === 'Escape') { notesAddOpen = false; render(); }
+    };
+    $('nimport').onclick = () => openNotesImport(list => {
+      deck.notes = [...notes, ...list.map(text => ({ id: uid(), text }))];
+      notesAddOpen = false;
+      saveNotes(deck); render();
+    });
+  }
   const q = sel => $app.querySelectorAll(sel);
   q('[data-nedit]').forEach(b => b.onclick = () => { editingNote = b.dataset.nedit; render(); const t = $('nedit'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); });
   q('[data-ncancel]').forEach(b => b.onclick = () => { editingNote = null; render(); });
